@@ -6,7 +6,6 @@
 
 - [ファミリーコンピュータ](./famicom.md)
 - [セガ・マスターシステム](./master_system.md)
-- [メガドライブ](./mega_drive.md)
 - [ゲームボーイ](./game_boy.md)
 - [ゲームボーイカラー](./game_boy_color.md)
 - [ゲームギア](./game_gear.md)
