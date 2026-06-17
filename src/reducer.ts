@@ -49,6 +49,7 @@ const EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES = new Set<number>([0x20, 0x2d, 0x
 const EFFECTIVE_FAMICOM_PALETTE_INDICES = buildEffectiveFamicomPaletteIndices();
 const LOW_BG_PALETTE_USAGE_CELL_THRESHOLD = 2;
 const LOW_BG_PALETTE_RESEED_MAX_PASSES = 3;
+const CHROMA_NEUTRAL_THRESHOLD = 18;
 
 interface FamicomReductionResult {
   finalCanvas: HTMLCanvasElement;
@@ -67,6 +68,8 @@ interface ReductionOptions {
   brightness: number;
   contrast: number;
   saturation: number;
+  hueSimilarityDegrees: number;
+  hueSimilarityWeight: number;
   quantizationMode: QuantizationMode;
   glitchPreviewEnabled: boolean;
 }
@@ -163,7 +166,7 @@ export function reduceFamicomImage(
 ): FamicomReductionResult {
   const weightedRoi = roi && roiEnabled && roi.enabled ? roi : null;
   const indexedImage = quantizeCanvasToFamicomPalette(sourceCanvas, options);
-  const bgAnalysis = analyzeFamicomBackground(indexedImage, weightedRoi);
+  const bgAnalysis = analyzeFamicomBackground(indexedImage, weightedRoi, options);
   const renderedPreview = convergeFamicomPreview(
     indexedImage,
     bgAnalysis.universalColor,
@@ -273,14 +276,14 @@ function quantizeCanvasToFamicomPalette(sourceCanvas: HTMLCanvasElement, options
 }
 
 /** BG解析をまとめて実行するにゃ。 */
-function analyzeFamicomBackground(indexedImage: IndexedImage, roi: RegionOfInterest | null): {
+function analyzeFamicomBackground(indexedImage: IndexedImage, roi: RegionOfInterest | null, options: ReductionOptions): {
   universalColor: number;
   bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette];
   assignment: BgAssignmentResult;
 } {
   const universalColor = chooseUniversalColor(indexedImage, roi);
   const cellAnalyses = analyzeAttributeCells(indexedImage, roi, universalColor);
-  const { bgSubPalettes, assignment } = solveBackgroundPalettes(cellAnalyses, universalColor);
+  const { bgSubPalettes, assignment } = solveBackgroundPalettes(cellAnalyses, universalColor, options);
 
   return {
     universalColor,
@@ -362,7 +365,8 @@ function analyzeAttributeCells(indexedImage: IndexedImage, roi: RegionOfInterest
 /** BGパレットを割り当て結果込みで整えるにゃ。 */
 function solveBackgroundPalettes(
   cellAnalyses: CellAnalysis[],
-  universalColor: number
+  universalColor: number,
+  options: ReductionOptions
 ): {
   bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette];
   assignment: BgAssignmentResult;
@@ -371,12 +375,12 @@ function solveBackgroundPalettes(
   let assignment = assignPalettesToCells(cellAnalyses, bgSubPalettes, universalColor);
 
   for (let pass = 0; pass < BG_PALETTE_REFINEMENT_PASSES; pass += 1) {
-    bgSubPalettes = rebuildSubPalettesFromAssignments(cellAnalyses, assignment);
+    bgSubPalettes = rebuildSubPalettesFromAssignments(cellAnalyses, assignment, options);
     assignment = assignPalettesToCells(cellAnalyses, bgSubPalettes, universalColor);
   }
 
   for (let pass = 0; pass < LOW_BG_PALETTE_RESEED_MAX_PASSES; pass += 1) {
-    const improved = reseedLowUsageBgPalettes(cellAnalyses, assignment, bgSubPalettes, universalColor);
+    const improved = reseedLowUsageBgPalettes(cellAnalyses, assignment, bgSubPalettes, universalColor, options);
     if (!improved) {
       break;
     }
@@ -413,7 +417,8 @@ function buildInitialSubPalettes(cellAnalyses: CellAnalysis[]): [FamicomSubPalet
 /** 割り当て済み属性セルからBGサブパレットを再構築するにゃ。 */
 function rebuildSubPalettesFromAssignments(
   cellAnalyses: CellAnalysis[],
-  assignment: BgAssignmentResult
+  assignment: BgAssignmentResult,
+  options: ReductionOptions
 ): [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette] {
   const weightedColorsByPalette = Array.from(
     { length: BG_SUB_PALETTE_COUNT },
@@ -441,10 +446,7 @@ function rebuildSubPalettesFromAssignments(
       return fillSubPalette([]);
     }
 
-    const colors = [...bucket.entries()]
-      .sort((left, right) => right[1] - left[1])
-      .slice(0, SUB_PALETTE_COLOR_COUNT)
-      .map(([color]) => color);
+    const colors = selectDiversePaletteColors(bucket, options);
     return fillSubPalette(colors);
   });
 
@@ -512,7 +514,8 @@ function reseedLowUsageBgPalettes(
   cellAnalyses: CellAnalysis[],
   assignment: BgAssignmentResult,
   bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
-  universalColor: number
+  universalColor: number,
+  options: ReductionOptions
 ):
   | {
       bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette];
@@ -536,7 +539,7 @@ function reseedLowUsageBgPalettes(
   const reservedColors = new Set<number>();
 
   for (const paletteIndex of lowUsageIndices) {
-    const reseeded = buildLowUsageBgPaletteSeed(cellAnalyses, assignment, universalColor, reservedColors);
+    const reseeded = buildLowUsageBgPaletteSeed(cellAnalyses, assignment, universalColor, reservedColors, options);
     if (reseeded.join(",") === candidatePalettes[paletteIndex].join(",")) {
       continue;
     }
@@ -568,7 +571,8 @@ function buildLowUsageBgPaletteSeed(
   cellAnalyses: CellAnalysis[],
   assignment: BgAssignmentResult,
   universalColor: number,
-  reservedColors: Set<number>
+  reservedColors: Set<number>,
+  options: ReductionOptions
 ): FamicomSubPalette {
   const deficitMap = new Map<number, number>();
   const cellMap = new Map(cellAnalyses.map((cell) => [makeCellKey(cell.cellX, cell.cellY), cell]));
@@ -589,17 +593,121 @@ function buildLowUsageBgPaletteSeed(
     }
   }
 
-  const colors = [...deficitMap.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .filter(([color]) => !reservedColors.has(color))
-    .slice(0, SUB_PALETTE_COLOR_COUNT)
-    .map(([color]) => color);
+  const filteredDeficitMap = new Map(
+    [...deficitMap.entries()].filter(([color]) => !reservedColors.has(color))
+  );
+  const colors = selectDiversePaletteColors(filteredDeficitMap, options);
   return fillSubPalette(colors);
 }
 
 /** 属性セル割り当て結果の総コストを返すにゃ。 */
 function calculateAssignmentCost(assignment: BgAssignmentResult): number {
   return assignment.attributeCells.reduce((total, cell) => total + cell.weightedScore + cell.missingPixelCount * 0.25, 0);
+}
+
+/** 重みと弱い色相分散を見ながら3色を選ぶにゃ。 */
+function selectDiversePaletteColors(weightedColors: Map<number, number>, options: ReductionOptions): number[] {
+  const remaining = [...weightedColors.entries()]
+    .sort((left, right) => right[1] - left[1]);
+  const selected: number[] = [];
+
+  while (remaining.length > 0 && selected.length < SUB_PALETTE_COLOR_COUNT) {
+    let bestColor = remaining[0][0];
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const [color, weight] of remaining) {
+      const score = weight - calculateHueSimilarityPenalty(color, selected, weight, options);
+      if (score > bestScore) {
+        bestScore = score;
+        bestColor = color;
+      }
+    }
+
+    selected.push(bestColor);
+    const selectedSet = new Set(selected);
+    for (let index = remaining.length - 1; index >= 0; index -= 1) {
+      if (selectedSet.has(remaining[index][0])) {
+        remaining.splice(index, 1);
+      }
+    }
+  }
+
+  return selected;
+}
+
+/** 既存選択色と色相が近すぎる場合の軽いペナルティを返すにゃ。 */
+function calculateHueSimilarityPenalty(
+  colorIndex: number,
+  selectedColors: number[],
+  weight: number,
+  options: ReductionOptions
+): number {
+  if (selectedColors.length === 0 || isNeutralFamicomColor(colorIndex)) {
+    return 0;
+  }
+
+  const hue = getFamicomHue(colorIndex);
+  if (hue === null) {
+    return 0;
+  }
+
+  let penalty = 0;
+  for (const selectedColor of selectedColors) {
+    if (isNeutralFamicomColor(selectedColor)) {
+      continue;
+    }
+
+    const selectedHue = getFamicomHue(selectedColor);
+    if (selectedHue === null) {
+      continue;
+    }
+
+    const hueDistance = measureHueDistance(hue, selectedHue);
+    if (hueDistance < options.hueSimilarityDegrees) {
+      penalty += (1 - hueDistance / options.hueSimilarityDegrees) * weight * options.hueSimilarityWeight;
+    }
+  }
+
+  return penalty;
+}
+
+/** 無彩色寄りかどうかを返すにゃ。 */
+function isNeutralFamicomColor(colorIndex: number): boolean {
+  const [red, green, blue] = FAMICOM_PREVIEW_PALETTE[colorIndex];
+  const maxValue = Math.max(red, green, blue);
+  const minValue = Math.min(red, green, blue);
+  return maxValue - minValue <= CHROMA_NEUTRAL_THRESHOLD;
+}
+
+/** ファミコン色の色相角を返すにゃ。 */
+function getFamicomHue(colorIndex: number): number | null {
+  const [red, green, blue] = FAMICOM_PREVIEW_PALETTE[colorIndex];
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const maxValue = Math.max(r, g, b);
+  const minValue = Math.min(r, g, b);
+  const delta = maxValue - minValue;
+  if (delta === 0) {
+    return null;
+  }
+
+  let hue = 0;
+  if (maxValue === r) {
+    hue = 60 * (((g - b) / delta) % 6);
+  } else if (maxValue === g) {
+    hue = 60 * (((b - r) / delta) + 2);
+  } else {
+    hue = 60 * (((r - g) / delta) + 4);
+  }
+
+  return hue < 0 ? hue + 360 : hue;
+}
+
+/** 2色相間の最短距離を返すにゃ。 */
+function measureHueDistance(left: number, right: number): number {
+  const diff = Math.abs(left - right);
+  return Math.min(diff, 360 - diff);
 }
 
 /** BG割り当て結果からプレビュー画像を描くにゃ。 */

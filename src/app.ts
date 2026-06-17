@@ -53,6 +53,8 @@ function createInitialState(): AppState {
     brightness: 0,
     contrast: 0,
     saturation: 0,
+    hueSimilarityDegrees: 64,
+    hueSimilarityWeight: 0.34,
     quantizationMode: "luma-weighted",
     famicomAnalysis: null,
     viewMode: "final",
@@ -82,21 +84,29 @@ function createAppMarkup(): string {
           <p class="hint">画像は Ctrl+V でも貼り付けできるにゃ。</p>
           <p id="machineNote" class="hint"></p>
           <label class="field">
-            <span>ROIのディテール優先度</span>
+            <span class="field-label"><span>ROIのディテール優先度</span><span id="detailWeightValue">2.0</span></span>
             <input id="detailWeightInput" type="range" min="1" max="4" step="0.5" value="2" />
           </label>
           <p class="hint">ROIは「この範囲をできるだけ細かく残したい」という優先範囲にゃ。ROI内は BG / Sprite の配分でディテールを優先しやすくなるにゃ。</p>
           <label class="field">
-            <span>明度</span>
+            <span class="field-label"><span>明度</span><span id="brightnessValue">0</span></span>
             <input id="brightnessInput" type="range" min="-100" max="100" step="1" value="0" />
           </label>
           <label class="field">
-            <span>コントラスト</span>
+            <span class="field-label"><span>コントラスト</span><span id="contrastValue">0</span></span>
             <input id="contrastInput" type="range" min="-100" max="100" step="1" value="0" />
           </label>
           <label class="field">
-            <span>彩度</span>
+            <span class="field-label"><span>彩度</span><span id="saturationValue">0</span></span>
             <input id="saturationInput" type="range" min="-100" max="100" step="1" value="0" />
+          </label>
+          <label class="field">
+            <span class="field-label"><span>色相ばらけ優先</span><span id="hueSimilarityDegreesValue">64</span></span>
+            <input id="hueSimilarityDegreesInput" type="range" min="0" max="120" step="1" value="64" />
+          </label>
+          <label class="field">
+            <span class="field-label"><span>近色回避の強さ</span><span id="hueSimilarityWeightValue">0.34</span></span>
+            <input id="hueSimilarityWeightInput" type="range" min="0" max="1" step="0.01" value="0.34" />
           </label>
           <label class="field">
             <span>64色減色アルゴリズム</span>
@@ -182,9 +192,17 @@ function queryElements(rootElement: HTMLElement) {
   return {
     fileInput: requireElement<HTMLInputElement>(rootElement, "#fileInput"),
     detailWeightInput: requireElement<HTMLInputElement>(rootElement, "#detailWeightInput"),
+    detailWeightValue: requireElement<HTMLSpanElement>(rootElement, "#detailWeightValue"),
     brightnessInput: requireElement<HTMLInputElement>(rootElement, "#brightnessInput"),
+    brightnessValue: requireElement<HTMLSpanElement>(rootElement, "#brightnessValue"),
     contrastInput: requireElement<HTMLInputElement>(rootElement, "#contrastInput"),
+    contrastValue: requireElement<HTMLSpanElement>(rootElement, "#contrastValue"),
     saturationInput: requireElement<HTMLInputElement>(rootElement, "#saturationInput"),
+    saturationValue: requireElement<HTMLSpanElement>(rootElement, "#saturationValue"),
+    hueSimilarityDegreesInput: requireElement<HTMLInputElement>(rootElement, "#hueSimilarityDegreesInput"),
+    hueSimilarityDegreesValue: requireElement<HTMLSpanElement>(rootElement, "#hueSimilarityDegreesValue"),
+    hueSimilarityWeightInput: requireElement<HTMLInputElement>(rootElement, "#hueSimilarityWeightInput"),
+    hueSimilarityWeightValue: requireElement<HTMLSpanElement>(rootElement, "#hueSimilarityWeightValue"),
     quantizationModeInput: requireElement<HTMLSelectElement>(rootElement, "#quantizationModeInput"),
     roiEnabledInput: requireElement<HTMLInputElement>(rootElement, "#roiEnabledInput"),
     glitchPreviewEnabledInput: requireElement<HTMLInputElement>(rootElement, "#glitchPreviewEnabledInput"),
@@ -261,6 +279,16 @@ function bindEvents(
     renderAll(elements, state);
   });
 
+  elements.hueSimilarityDegreesInput.addEventListener("input", () => {
+    state.hueSimilarityDegrees = Number(elements.hueSimilarityDegreesInput.value);
+    renderAll(elements, state);
+  });
+
+  elements.hueSimilarityWeightInput.addEventListener("input", () => {
+    state.hueSimilarityWeight = Number(elements.hueSimilarityWeightInput.value);
+    renderAll(elements, state);
+  });
+
   elements.quantizationModeInput.addEventListener("change", () => {
     state.quantizationMode = elements.quantizationModeInput.value as QuantizationMode;
     renderAll(elements, state);
@@ -287,6 +315,7 @@ function bindEvents(
 
   elements.recalculateButton.addEventListener("click", () => {
     rerenderReduction(state);
+    state.viewMode = "final";
     renderAll(elements, state);
   });
 
@@ -392,6 +421,8 @@ function rerenderReduction(state: AppState): void {
     brightness: state.brightness,
     contrast: state.contrast,
     saturation: state.saturation,
+    hueSimilarityDegrees: state.hueSimilarityDegrees,
+    hueSimilarityWeight: state.hueSimilarityWeight,
     quantizationMode: state.quantizationMode,
     glitchPreviewEnabled: state.glitchPreviewEnabled
   });
@@ -406,9 +437,17 @@ function renderAll(elements: ReturnType<typeof queryElements>, state: AppState):
   const profile = getMachineProfile();
   elements.machineNote.textContent = profile.notes;
   elements.detailWeightInput.value = String(state.detailWeight);
+  elements.detailWeightValue.textContent = state.detailWeight.toFixed(1);
   elements.brightnessInput.value = String(state.brightness);
+  elements.brightnessValue.textContent = String(state.brightness);
   elements.contrastInput.value = String(state.contrast);
+  elements.contrastValue.textContent = String(state.contrast);
   elements.saturationInput.value = String(state.saturation);
+  elements.saturationValue.textContent = String(state.saturation);
+  elements.hueSimilarityDegreesInput.value = String(state.hueSimilarityDegrees);
+  elements.hueSimilarityDegreesValue.textContent = String(state.hueSimilarityDegrees);
+  elements.hueSimilarityWeightInput.value = state.hueSimilarityWeight.toFixed(2);
+  elements.hueSimilarityWeightValue.textContent = state.hueSimilarityWeight.toFixed(2);
   elements.quantizationModeInput.value = state.quantizationMode;
   elements.roiEnabledInput.checked = state.roiEnabled;
   elements.glitchPreviewEnabledInput.checked = state.glitchPreviewEnabled;

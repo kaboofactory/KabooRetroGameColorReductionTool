@@ -50,6 +50,8 @@ export interface AppState {
   brightness: number;
   contrast: number;
   saturation: number;
+  hueSimilarityDegrees: number;
+  hueSimilarityWeight: number;
   quantizationMode: QuantizationMode;
   famicomAnalysis: FamicomAnalysis | null;
   viewMode: "final" | "bg" | "bg0" | "bg1" | "bg2" | "bg3" | "sprite" | "source";
