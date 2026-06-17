@@ -49,7 +49,8 @@ function createAppMarkup(): string {
       <header class="app-header">
         <div>
           <p class="eyebrow">Kaboo Retro Game Color Reduction Tool</p>
-          <h1>ファミコン風に減色するツール</h1>
+          <h1>画像をファミコン風に変換するにゃ。</h1>
+          <p class="danger-note">ファミコンハードウェア仕様有識者は使用厳禁！！</p>
         </div>
       </header>
 

@@ -58,6 +58,12 @@ button {
   letter-spacing: 0.06em;
 }
 
+.danger-note {
+  margin: 8px 0 0;
+  color: #ff0000;
+  font-weight: 700;
+}
+
 h1,
 h2 {
   margin: 0;
