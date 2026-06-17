@@ -72,8 +72,8 @@ function createAppMarkup(): string {
       <header class="app-header">
         <div>
           <p class="eyebrow">Kaboo Retro Game Color Reduction Tool</p>
-          <h1>画像をファミコン風に変換します。</h1>
-          <p class="danger-note">ファミコンハードウェア仕様有識者は使用厳禁！！</p>
+          <h1>ファミコン風画像変換ツール</h1>
+          <p class="danger-note">ファミコンハードウェア仕様有識者は使用厳禁</p>
         </div>
       </header>
 
@@ -197,6 +197,14 @@ function createAppMarkup(): string {
           <summary>Spriteタイルパレット</summary>
           <div id="spriteTilePaletteInfo"></div>
         </details>
+      </section>
+
+      <section class="card">
+        <h2>免責事項</h2>
+        <p class="hint">本ソフトウェアは現状のまま提供され、明示または黙示を問わず、いかなる種類の保証も行いません。</p>
+        <p class="hint">本ソフトウェアの使用によって生じた損害やトラブルについて、作者は一切の責任を負いません。</p>
+        <p class="hint">This software is provided "as is", without warranty of any kind, express or implied.</p>
+        <p class="hint">The author shall not be held liable for any damages or issues arising from the use of this software.</p>
       </section>
     </div>
   `;

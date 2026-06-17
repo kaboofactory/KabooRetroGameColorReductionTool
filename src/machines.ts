@@ -3,7 +3,7 @@ import type { MachineProfile } from "./types";
 const FAMICOM_PROFILE: MachineProfile = {
   id: "famicom",
   label: "ファミリーコンピュータ",
-  notes: "画像をファミコン風に変換するにゃ。"
+  notes: "※ファミコンハードウェアをある程度シミュレートしているけど完全ではないので要注意"
 };
 
 /** ファミコンの固定プロファイルを返すにゃ。 */
