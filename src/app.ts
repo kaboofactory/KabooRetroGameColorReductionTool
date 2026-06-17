@@ -27,7 +27,7 @@ const FAMICOM_DISPLAY_PALETTE: ReadonlyArray<readonly [number, number, number]> 
   [0, 252, 252], [248, 216, 248], [0, 0, 0], [0, 0, 0]
 ] as const;
 
-/** アプリ本体を構築するにゃ。 */
+/** アプリ本体を構築する。 */
 export function bootstrapApp(rootElement: HTMLElement): void {
   const state = createInitialState();
   const roiManager = new RoiManager();
@@ -38,11 +38,12 @@ export function bootstrapApp(rootElement: HTMLElement): void {
   renderAll(elements, state);
 }
 
-/** アプリ初期状態を生成するにゃ。 */
+/** アプリ初期状態を生成する。 */
 function createInitialState(): AppState {
   return {
     sourceImage: null,
     sourceCanvas: document.createElement("canvas"),
+    quantizedCanvas: document.createElement("canvas"),
     reducedCanvas: document.createElement("canvas"),
     bgCanvas: document.createElement("canvas"),
     spriteCanvas: document.createElement("canvas"),
@@ -56,20 +57,22 @@ function createInitialState(): AppState {
     hueSimilarityDegrees: 64,
     hueSimilarityWeight: 0.34,
     quantizationMode: "luma-weighted",
+    excludeBrownQuantizationColors: false,
+    excludeGrayQuantizationColors: false,
     famicomAnalysis: null,
     viewMode: "final",
     showRoiOverlay: false
   };
 }
 
-/** アプリの静的なHTMLを生成するにゃ。 */
+/** アプリの静的なHTMLを生成する。 */
 function createAppMarkup(): string {
   return `
     <div class="app-shell">
       <header class="app-header">
         <div>
           <p class="eyebrow">Kaboo Retro Game Color Reduction Tool</p>
-          <h1>画像をファミコン風に変換するにゃ。</h1>
+          <h1>画像をファミコン風に変換します。</h1>
           <p class="danger-note">ファミコンハードウェア仕様有識者は使用厳禁！！</p>
         </div>
       </header>
@@ -81,13 +84,13 @@ function createAppMarkup(): string {
             <span>画像ファイル</span>
             <input id="fileInput" type="file" accept="image/*" />
           </label>
-          <p class="hint">画像は Ctrl+V でも貼り付けできるにゃ。</p>
+          <p class="hint">画像は Ctrl+V でも貼り付けできます。</p>
           <p id="machineNote" class="hint"></p>
           <label class="field">
             <span class="field-label"><span>ROIのディテール優先度</span><span id="detailWeightValue">2.0</span></span>
             <input id="detailWeightInput" type="range" min="1" max="4" step="0.5" value="2" />
           </label>
-          <p class="hint">ROIは「この範囲をできるだけ細かく残したい」という優先範囲にゃ。ROI内は BG / Sprite の配分でディテールを優先しやすくなるにゃ。</p>
+          <p class="hint">ROIは「この範囲をできるだけ細かく残したい」という優先範囲です。ROI内は BG / Sprite の配分でディテールを優先しやすくなります。</p>
           <label class="field">
             <span class="field-label"><span>明度</span><span id="brightnessValue">0</span></span>
             <input id="brightnessInput" type="range" min="-100" max="100" step="1" value="0" />
@@ -117,6 +120,16 @@ function createAppMarkup(): string {
           </label>
           <div class="inline-row">
             <label class="checkbox">
+              <input id="excludeBrownQuantizationColorsInput" type="checkbox" />
+              <span>茶色系を減色候補から外す</span>
+            </label>
+            <label class="checkbox">
+              <input id="excludeGrayQuantizationColorsInput" type="checkbox" />
+              <span>グレー系を減色候補から外す</span>
+            </label>
+          </div>
+          <div class="inline-row">
+            <label class="checkbox">
               <input id="roiEnabledInput" type="checkbox" checked />
               <span>ROIを有効にする</span>
             </label>
@@ -141,19 +154,21 @@ function createAppMarkup(): string {
             <button id="viewBg2Button" class="tab-button" type="button">BG2</button>
             <button id="viewBg3Button" class="tab-button" type="button">BG3</button>
             <button id="viewSpriteButton" class="tab-button" type="button">Sprite</button>
+            <button id="viewQuantizedButton" class="tab-button" type="button">量子化</button>
             <button id="viewSourceButton" class="tab-button" type="button">元画像</button>
           </div>
         </div>
         <div id="canvasFrame" class="canvas-frame">
           <canvas id="previewCanvas"></canvas>
-          <div id="emptyState" class="empty-state">画像を読み込んでにゃ</div>
+          <div id="emptyState" class="empty-state">画像を読み込んでください</div>
         </div>
         <div class="inline-row" style="margin-top: 12px;">
           <button id="saveFinalButton" class="secondary-button" type="button">最終画像を保存</button>
           <button id="saveBgButton" class="secondary-button" type="button">BG画像を保存</button>
+          <button id="saveQuantizedButton" class="secondary-button" type="button">量子化画像を保存</button>
           <button id="saveSpriteButton" class="secondary-button" type="button">Sprite画像を保存</button>
         </div>
-        <p class="hint">画像上をドラッグすると、ROIを1つだけ指定できるにゃ。ROIはタイル単位に丸められ、その範囲はできるだけディテールを残す方向で変換するにゃ。最終画像は BG と採用Sprite を合成した実用プレビューにゃ。</p>
+        <p class="hint">画像上をドラッグすると、ROIを1つだけ指定できます。ROIはタイル単位に丸められ、その範囲はできるだけディテールを残す方向で変換します。最終画像は BG と採用Sprite を合成した実用プレビューです。</p>
       </section>
 
       <section class="card">
@@ -187,7 +202,7 @@ function createAppMarkup(): string {
   `;
 }
 
-/** 必要なDOM要素を集めるにゃ。 */
+/** 必要なDOM要素を集める。 */
 function queryElements(rootElement: HTMLElement) {
   return {
     fileInput: requireElement<HTMLInputElement>(rootElement, "#fileInput"),
@@ -204,11 +219,14 @@ function queryElements(rootElement: HTMLElement) {
     hueSimilarityWeightInput: requireElement<HTMLInputElement>(rootElement, "#hueSimilarityWeightInput"),
     hueSimilarityWeightValue: requireElement<HTMLSpanElement>(rootElement, "#hueSimilarityWeightValue"),
     quantizationModeInput: requireElement<HTMLSelectElement>(rootElement, "#quantizationModeInput"),
+    excludeBrownQuantizationColorsInput: requireElement<HTMLInputElement>(rootElement, "#excludeBrownQuantizationColorsInput"),
+    excludeGrayQuantizationColorsInput: requireElement<HTMLInputElement>(rootElement, "#excludeGrayQuantizationColorsInput"),
     roiEnabledInput: requireElement<HTMLInputElement>(rootElement, "#roiEnabledInput"),
     glitchPreviewEnabledInput: requireElement<HTMLInputElement>(rootElement, "#glitchPreviewEnabledInput"),
     clearRoiButton: requireElement<HTMLButtonElement>(rootElement, "#clearRoiButton"),
     saveFinalButton: requireElement<HTMLButtonElement>(rootElement, "#saveFinalButton"),
     saveBgButton: requireElement<HTMLButtonElement>(rootElement, "#saveBgButton"),
+    saveQuantizedButton: requireElement<HTMLButtonElement>(rootElement, "#saveQuantizedButton"),
     saveSpriteButton: requireElement<HTMLButtonElement>(rootElement, "#saveSpriteButton"),
     recalculateButton: requireElement<HTMLButtonElement>(rootElement, "#recalculateButton"),
     viewFinalButton: requireElement<HTMLButtonElement>(rootElement, "#viewFinalButton"),
@@ -217,6 +235,7 @@ function queryElements(rootElement: HTMLElement) {
     viewBg2Button: requireElement<HTMLButtonElement>(rootElement, "#viewBg2Button"),
     viewBg3Button: requireElement<HTMLButtonElement>(rootElement, "#viewBg3Button"),
     viewSpriteButton: requireElement<HTMLButtonElement>(rootElement, "#viewSpriteButton"),
+    viewQuantizedButton: requireElement<HTMLButtonElement>(rootElement, "#viewQuantizedButton"),
     viewSourceButton: requireElement<HTMLButtonElement>(rootElement, "#viewSourceButton"),
     machineNote: requireElement<HTMLParagraphElement>(rootElement, "#machineNote"),
     previewCanvas: requireElement<HTMLCanvasElement>(rootElement, "#previewCanvas"),
@@ -230,7 +249,7 @@ function queryElements(rootElement: HTMLElement) {
   };
 }
 
-/** DOMイベントを束ねるにゃ。 */
+/** DOMイベントを束ねる。 */
 function bindEvents(
   elements: ReturnType<typeof queryElements>,
   state: AppState,
@@ -293,6 +312,14 @@ function bindEvents(
     state.quantizationMode = elements.quantizationModeInput.value as QuantizationMode;
     renderAll(elements, state);
   });
+  elements.excludeBrownQuantizationColorsInput.addEventListener("change", () => {
+    state.excludeBrownQuantizationColors = elements.excludeBrownQuantizationColorsInput.checked;
+    renderAll(elements, state);
+  });
+  elements.excludeGrayQuantizationColorsInput.addEventListener("change", () => {
+    state.excludeGrayQuantizationColors = elements.excludeGrayQuantizationColorsInput.checked;
+    renderAll(elements, state);
+  });
 
   elements.roiEnabledInput.addEventListener("change", () => {
     state.roiEnabled = elements.roiEnabledInput.checked;
@@ -325,6 +352,9 @@ function bindEvents(
   elements.saveBgButton.addEventListener("click", () => {
     saveCanvasImage(state.bgCanvas, "famicom-bg.png");
   });
+  elements.saveQuantizedButton.addEventListener("click", () => {
+    saveCanvasImage(state.quantizedCanvas, "famicom-quantized.png");
+  });
   elements.saveSpriteButton.addEventListener("click", () => {
     saveCanvasImage(state.spriteCanvas, "famicom-sprite.png");
   });
@@ -335,6 +365,7 @@ function bindEvents(
   elements.viewBg2Button.addEventListener("click", () => switchViewMode("bg2", elements, state));
   elements.viewBg3Button.addEventListener("click", () => switchViewMode("bg3", elements, state));
   elements.viewSpriteButton.addEventListener("click", () => switchViewMode("sprite", elements, state));
+  elements.viewQuantizedButton.addEventListener("click", () => switchViewMode("quantized", elements, state));
   elements.viewSourceButton.addEventListener("click", () => switchViewMode("source", elements, state));
 
   elements.previewCanvas.addEventListener("pointerdown", (event) => {
@@ -386,7 +417,7 @@ function bindEvents(
   elements.previewCanvas.addEventListener("pointercancel", finishPointerInteraction);
 }
 
-/** 画像を読み込み、アプリ状態へ反映するにゃ。 */
+/** 画像を読み込み、アプリ状態へ反映する。 */
 async function updateSourceImage(
   file: File,
   state: AppState,
@@ -400,7 +431,7 @@ async function updateSourceImage(
   state.sourceCanvas.height = FAMICOM_SCREEN_HEIGHT;
   const context = state.sourceCanvas.getContext("2d");
   if (!context) {
-    throw new Error("画像読み込み用Canvasの初期化に失敗したにゃ。");
+    throw new Error("画像読み込み用Canvasの初期化に失敗しました。");
   }
 
   context.clearRect(0, 0, state.sourceCanvas.width, state.sourceCanvas.height);
@@ -411,7 +442,7 @@ async function updateSourceImage(
   renderAll(elements, state);
 }
 
-/** 現在状態からファミコン減色を再生成するにゃ。 */
+/** 現在状態からファミコン減色を再生成する。 */
 function rerenderReduction(state: AppState): void {
   if (!state.sourceImage) {
     return;
@@ -424,15 +455,18 @@ function rerenderReduction(state: AppState): void {
     hueSimilarityDegrees: state.hueSimilarityDegrees,
     hueSimilarityWeight: state.hueSimilarityWeight,
     quantizationMode: state.quantizationMode,
+    excludeBrownQuantizationColors: state.excludeBrownQuantizationColors,
+    excludeGrayQuantizationColors: state.excludeGrayQuantizationColors,
     glitchPreviewEnabled: state.glitchPreviewEnabled
   });
+  state.quantizedCanvas = result.quantizedCanvas;
   state.reducedCanvas = result.finalCanvas;
   state.bgCanvas = result.bgCanvas;
   state.spriteCanvas = result.spriteCanvas;
   state.famicomAnalysis = result.analysis;
 }
 
-/** 画面全体を再描画するにゃ。 */
+/** 画面全体を再描画する。 */
 function renderAll(elements: ReturnType<typeof queryElements>, state: AppState): void {
   const profile = getMachineProfile();
   elements.machineNote.textContent = profile.notes;
@@ -449,6 +483,8 @@ function renderAll(elements: ReturnType<typeof queryElements>, state: AppState):
   elements.hueSimilarityWeightInput.value = state.hueSimilarityWeight.toFixed(2);
   elements.hueSimilarityWeightValue.textContent = state.hueSimilarityWeight.toFixed(2);
   elements.quantizationModeInput.value = state.quantizationMode;
+  elements.excludeBrownQuantizationColorsInput.checked = state.excludeBrownQuantizationColors;
+  elements.excludeGrayQuantizationColorsInput.checked = state.excludeGrayQuantizationColors;
   elements.roiEnabledInput.checked = state.roiEnabled;
   elements.glitchPreviewEnabledInput.checked = state.glitchPreviewEnabled;
   elements.viewFinalButton.classList.toggle("is-active", state.viewMode === "final");
@@ -457,6 +493,7 @@ function renderAll(elements: ReturnType<typeof queryElements>, state: AppState):
   elements.viewBg2Button.classList.toggle("is-active", state.viewMode === "bg2");
   elements.viewBg3Button.classList.toggle("is-active", state.viewMode === "bg3");
   elements.viewSpriteButton.classList.toggle("is-active", state.viewMode === "sprite");
+  elements.viewQuantizedButton.classList.toggle("is-active", state.viewMode === "quantized");
   elements.viewSourceButton.classList.toggle("is-active", state.viewMode === "source");
 
   renderCanvas(elements.previewCanvas, elements.emptyState, state);
@@ -468,7 +505,7 @@ function renderAll(elements: ReturnType<typeof queryElements>, state: AppState):
   renderTilePaletteInfo(elements.spriteTilePaletteInfo, state.famicomAnalysis, "sprite");
 }
 
-/** キャンバスを再描画するにゃ。 */
+/** キャンバスを再描画する。 */
 function renderCanvas(
   previewCanvas: HTMLCanvasElement,
   emptyStateElement: HTMLDivElement,
@@ -490,7 +527,7 @@ function renderCanvas(
   const displayCanvas = getDisplayCanvas(state);
   if (displayCanvas.width === 0 || displayCanvas.height === 0) {
     emptyStateElement.style.display = "grid";
-    emptyStateElement.textContent = "設定を調整して「生成」を押してにゃ";
+    emptyStateElement.textContent = "設定を調整して「生成」を押してください";
     previewCanvas.width = state.sourceCanvas.width || 640;
     previewCanvas.height = state.sourceCanvas.height || 360;
     const context = previewCanvas.getContext("2d");
@@ -504,7 +541,7 @@ function renderCanvas(
 
   const context = previewCanvas.getContext("2d");
   if (!context) {
-    throw new Error("プレビューCanvasの描画に失敗したにゃ。");
+    throw new Error("プレビューCanvasの描画に失敗しました。");
   }
 
   context.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
@@ -519,7 +556,7 @@ function renderCanvas(
   }
 }
 
-/** 現在モードに応じた表示Canvasを返すにゃ。 */
+/** 現在モードに応じた表示Canvasを返す。 */
 function getDisplayCanvas(state: AppState): HTMLCanvasElement {
   switch (state.viewMode) {
     case "bg":
@@ -531,6 +568,8 @@ function getDisplayCanvas(state: AppState): HTMLCanvasElement {
       return createBgPaletteFocusCanvas(state.bgCanvas, state.famicomAnalysis, getHighlightedBgPaletteIndex(state.viewMode));
     case "sprite":
       return state.spriteCanvas;
+    case "quantized":
+      return state.quantizedCanvas;
     case "source":
       return state.sourceCanvas;
     case "final":
@@ -540,7 +579,7 @@ function getDisplayCanvas(state: AppState): HTMLCanvasElement {
 }
 
 
-/** ROI統計を描画するにゃ。 */
+/** ROI統計を描画する。 */
 function renderRoiStats(
   container: HTMLDivElement,
   roi: RegionOfInterest | null,
@@ -548,7 +587,7 @@ function renderRoiStats(
   analysis: AppState["famicomAnalysis"]
 ): void {
   if (!roi) {
-    container.innerHTML = "<p class=\"info-line\">ROIは未設定にゃ。</p>";
+    container.innerHTML = "<p class=\"info-line\">ROIは未設定です。</p>";
     return;
   }
 
@@ -564,10 +603,10 @@ function renderRoiStats(
   `;
 }
 
-/** BGパレット情報を描画するにゃ。 */
+/** BGパレット情報を描画する。 */
 function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["famicomAnalysis"]): void {
   if (!analysis) {
-    container.innerHTML = "<p class=\"info-line\">画像を読み込むとBGパレットを表示するにゃ。</p>";
+    container.innerHTML = "<p class=\"info-line\">画像を読み込むとBGパレットを表示します。</p>";
     return;
   }
 
@@ -644,7 +683,7 @@ function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["fami
     <p class="info-line">Spriteユニーク8x8タイル数: ${analysis.uniqueSpriteTileCount} / ${analysis.totalSpriteTileCount}</p>
     <p class="info-line">BG 8x8色数内訳: 1色 ${analysis.bgTileColorStats.oneColorTileCount} / 2色 ${analysis.bgTileColorStats.twoColorTileCount} / 3色 ${analysis.bgTileColorStats.threeColorTileCount} / 4色 ${analysis.bgTileColorStats.fourColorTileCount}</p>
     <p class="info-line">Universal color を使っているBG 8x8タイル数: ${analysis.bgTileColorStats.universalColorUsedTileCount} / ${analysis.totalBgTileCount}</p>
-    <p class="info-line">ファミコンは BG0-BG3 ごとの枚数上限はなく、属性セル割り当てと総タイル数を見るのが大事にゃ。</p>
+    <p class="info-line">ファミコンは BG0-BG3 ごとの枚数上限はなく、属性セル割り当てと総タイル数を見ることが重要です。</p>
     ${paletteLines}
     <p class="info-line">BGパレット利用ドット数</p>
     <div class="palette-usage-grid">${bgUsageBlocks}</div>
@@ -652,17 +691,17 @@ function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["fami
     ${spritePaletteLines}
     <p class="info-line">Spriteパレット利用ドット数</p>
     <div class="palette-usage-grid">${spriteUsageBlocks}</div>
-    <p class="info-line">BGタブの見方: 白グリッドは16x16属性セル、ラベルは割り当てBGパレット、赤みセルはSprite補完ありにゃ。</p>
-    <p class="info-line">BG0-BG3タブでは、そのパレット担当セルだけ明るく確認できるにゃ。</p>
+    <p class="info-line">BGタブの見方: 白グリッドは16x16属性セル、ラベルは割り当てBGパレット、赤みセルはSprite補完ありです。</p>
+    <p class="info-line">BG0-BG3タブでは、そのパレット担当セルだけ明るく確認できます。</p>
     <p class="info-line">重点属性セル</p>
-    <ul class="info-list">${hotspotCells || "<li>表示できる属性セルはまだないにゃ。</li>"}</ul>
+    <ul class="info-list">${hotspotCells || "<li>表示できる属性セルはまだありません。</li>"}</ul>
   `;
 }
 
-/** スプライト候補情報を描画するにゃ。 */
+/** スプライト候補情報を描画する。 */
 function renderSpriteInfo(container: HTMLDivElement, analysis: AppState["famicomAnalysis"]): void {
   if (!analysis) {
-    container.innerHTML = "<p class=\"info-line\">画像を読み込むとスプライト候補を表示するにゃ。</p>";
+    container.innerHTML = "<p class=\"info-line\">画像を読み込むとスプライト候補を表示します。</p>";
     return;
   }
 
@@ -697,13 +736,13 @@ function renderSpriteInfo(container: HTMLDivElement, analysis: AppState["famicom
     <p class="info-line">ROI優先候補数: ${analysis.spriteCandidates.filter((candidate) => candidate.overlapsRoi).length}</p>
     <p class="info-line">採用された8x8スプライト数: ${analysis.spriteCandidates.reduce((total, candidate) => total + candidate.spriteCount, 0)}</p>
     <p class="info-line">落選した8x8スプライト数: ${analysis.rejectedSpriteTiles.length}</p>
-    <p class="info-line">Sprite表示の見方: 採用されたスプライト画素だけを表示し、スプライトがない場所は黒で埋めるにゃ。</p>
-    <p class="info-line">SP0-SP3 は採用候補の色分布から自動生成した暫定パレットにゃ。</p>
-    <ul class="info-list">${topCandidates || "<li>候補なしにゃ。</li>"}</ul>
+    <p class="info-line">Sprite表示の見方: 採用されたスプライト画素だけを表示し、スプライトがない場所は黒で埋めます。</p>
+    <p class="info-line">SP0-SP3 は採用候補の色分布から自動生成した暫定パレットです。</p>
+    <ul class="info-list">${topCandidates || "<li>候補はありません。</li>"}</ul>
   `;
 }
 
-/** パレット利用ドット数ブロックを描画するにゃ。 */
+/** パレット利用ドット数ブロックを描画する。 */
 function renderPaletteUsageBlock(label: string, entries: Array<{ colorIndex: number; pixelCount: number }>): string {
   const cells = entries
     .map((entry) => {
@@ -733,34 +772,34 @@ function renderPaletteUsageBlock(label: string, entries: Array<{ colorIndex: num
   `;
 }
 
-/** 指定色の上で見やすい文字色を返すにゃ。 */
+/** 指定色の上で見やすい文字色を返す。 */
 function getReadableTextColor(red: number, green: number, blue: number): string {
   const luma = red * 0.299 + green * 0.587 + blue * 0.114;
   return luma >= 150 ? "#111111" : "#f8f4ea";
 }
 
-/** ファミコン色番号に対応するRGBを返すにゃ。 */
+/** ファミコン色番号に対応するRGBを返す。 */
 function getFamicomColorRgb(colorIndex: number): readonly [number, number, number] {
   return FAMICOM_DISPLAY_PALETTE[colorIndex] ?? [0, 0, 0];
 }
 
-/** ファミコン色番号をRGB16進表記へ整形するにゃ。 */
+/** ファミコン色番号をRGB16進表記へ整形する。 */
 function formatFamicomRgbHex(colorIndex: number): string {
   const rgb = getFamicomColorRgb(colorIndex);
   return `#${rgb.map((value) => value.toString(16).toUpperCase().padStart(2, "0")).join("")}`;
 }
 
-/** 警告情報を描画するにゃ。 */
+/** 警告情報を描画する。 */
 function renderWarningInfo(container: HTMLDivElement, analysis: AppState["famicomAnalysis"]): void {
   if (!analysis) {
-    container.innerHTML = "<p class=\"info-line\">画像を読み込むと警告を表示するにゃ。</p>";
+    container.innerHTML = "<p class=\"info-line\">画像を読み込むと警告を表示します。</p>";
     return;
   }
 
   const overflowCells = analysis.attributeCells.filter((cell) => cell.unresolvedPixelCount > 0).length;
   const lines: Array<{ text: string; isProblem: boolean }> = [
     {
-      text: `総合判定: ${analysis.hardwareStatus === "ok" ? "概算では実機制限内にゃ" : "要注意にゃ"}`,
+      text: `総合判定: ${analysis.hardwareStatus === "ok" ? "概算では実機制限内です" : "要注意です"}`,
       isProblem: analysis.hardwareStatus !== "ok"
     },
     {
@@ -800,7 +839,7 @@ function renderWarningInfo(container: HTMLDivElement, analysis: AppState["famico
       isProblem: false
     },
     {
-      text: "実用版メモ: 落選Sprite分は最終画像でBG近似のまま残るにゃ",
+      text: "実用版メモ: 落選Sprite分は最終画像でBG近似のまま残ります",
       isProblem: false
     }
   ];
@@ -828,18 +867,18 @@ function renderWarningInfo(container: HTMLDivElement, analysis: AppState["famico
     <p class="info-line">簡易ハードウェア判定</p>
     <ul class="info-list">${findings}</ul>
     <p class="info-line">収束履歴</p>
-    <ul class="info-list">${convergenceHistory || "<li>履歴なしにゃ。</li>"}</ul>
+    <ul class="info-list">${convergenceHistory || "<li>履歴はありません。</li>"}</ul>
   `;
 }
 
-/** BG/Spriteの番地順タイル一覧を描画するにゃ。 */
+/** BG/Spriteの番地順タイル一覧を描画する。 */
 function renderTilePaletteInfo(
   container: HTMLDivElement,
   analysis: AppState["famicomAnalysis"],
   kind: "bg" | "sprite"
 ): void {
   if (!analysis) {
-    container.innerHTML = `<p class="info-line">画像を読み込むと${kind === "bg" ? "BG" : "Sprite"}タイルパレットを表示するにゃ。</p>`;
+    container.innerHTML = `<p class="info-line">画像を読み込むと${kind === "bg" ? "BG" : "Sprite"}タイルパレットを表示します。</p>`;
     return;
   }
 
@@ -863,7 +902,7 @@ function renderTilePaletteInfo(
   hint.className = "hint";
   hint.textContent = usageSummary.length > 0
     ? `先頭の使用回数: ${usageSummary}`
-    : "使用タイルはまだないにゃ。";
+    : "使用タイルはまだありません。";
   container.appendChild(hint);
 
   if (tilePaletteSheet.entries.length === 0) {
@@ -876,13 +915,13 @@ function renderTilePaletteInfo(
   canvas.className = "tile-palette-canvas";
   const context = canvas.getContext("2d");
   if (!context) {
-    throw new Error("タイルパレットCanvasの描画に失敗したにゃ。");
+    throw new Error("タイルパレットCanvasの描画に失敗しました。");
   }
   context.drawImage(tilePaletteSheet.canvas, 0, 0);
   container.appendChild(canvas);
 }
 
-/** ROIオーバーレイを描くにゃ。 */
+/** ROIオーバーレイを描く。 */
 function drawRoiOverlay(context: CanvasRenderingContext2D, roi: RegionOfInterest): void {
   context.save();
   context.strokeStyle = "#ff7a00";
@@ -910,7 +949,7 @@ function drawRoiOverlay(context: CanvasRenderingContext2D, roi: RegionOfInterest
   context.restore();
 }
 
-/** BG属性セルの割り当てオーバーレイを描くにゃ。 */
+/** BG属性セルの割り当てオーバーレイを描く。 */
 function drawBgAttributeOverlay(
   context: CanvasRenderingContext2D,
   analysis: NonNullable<AppState["famicomAnalysis"]>,
@@ -950,7 +989,7 @@ function drawBgAttributeOverlay(
   context.restore();
 }
 
-/** BG0-BG3の注目表示用Canvasを生成するにゃ。 */
+/** BG0-BG3の注目表示用Canvasを生成する。 */
 function createBgPaletteFocusCanvas(
   bgCanvas: HTMLCanvasElement,
   analysis: AppState["famicomAnalysis"],
@@ -965,7 +1004,7 @@ function createBgPaletteFocusCanvas(
   focusedCanvas.height = bgCanvas.height;
   const context = focusedCanvas.getContext("2d");
   if (!context) {
-    throw new Error("BG注目表示Canvasの描画に失敗したにゃ。");
+    throw new Error("BG注目表示Canvasの描画に失敗しました。");
   }
 
   context.drawImage(bgCanvas, 0, 0);
@@ -982,12 +1021,12 @@ function createBgPaletteFocusCanvas(
   return focusedCanvas;
 }
 
-/** BG個別表示モードかどうかを返すにゃ。 */
+/** BG個別表示モードかどうかを返す。 */
 function isBgPaletteViewMode(viewMode: AppState["viewMode"]): boolean {
   return viewMode === "bg0" || viewMode === "bg1" || viewMode === "bg2" || viewMode === "bg3";
 }
 
-/** BG個別表示モードからパレット番号を返すにゃ。 */
+/** BG個別表示モードからパレット番号を返す。 */
 function getHighlightedBgPaletteIndex(viewMode: AppState["viewMode"]): number | null {
   switch (viewMode) {
     case "bg0":
@@ -1003,7 +1042,7 @@ function getHighlightedBgPaletteIndex(viewMode: AppState["viewMode"]): number | 
   }
 }
 
-/** 現在の状態でROIオーバーレイを描くべきか返すにゃ。 */
+/** 現在の状態でROIオーバーレイを描くべきか返す。 */
 function shouldShowRoiOverlay(state: AppState): state is AppState & { roi: RegionOfInterest } {
   if (!state.roi || !state.roiEnabled || !state.roi.enabled) {
     return false;
@@ -1011,7 +1050,7 @@ function shouldShowRoiOverlay(state: AppState): state is AppState & { roi: Regio
   return true;
 }
 
-/** タブ表示を切り替えるにゃ。 */
+/** タブ表示を切り替える。 */
 function switchViewMode(
   viewMode: AppState["viewMode"],
   elements: ReturnType<typeof queryElements>,
@@ -1021,17 +1060,17 @@ function switchViewMode(
   renderAll(elements, state);
 }
 
-/** ファミコン色番号を見やすく整形するにゃ。 */
+/** ファミコン色番号を見やすく整形する。 */
 function formatFamicomColor(colorIndex: number): string {
   return `$${colorIndex.toString(16).toUpperCase().padStart(2, "0")}`;
 }
 
-/** サブパレット表示を返すにゃ。 */
+/** サブパレット表示を返す。 */
 function renderPaletteChipGroup(subPalette: FamicomSubPalette): string {
   return subPalette.map((color) => formatFamicomColor(color)).join(", ");
 }
 
-/** PointerEventをキャンバス内の論理座標へ変換するにゃ。 */
+/** PointerEventをキャンバス内の論理座標へ変換する。 */
 function convertPointerToCanvasPoint(event: PointerEvent, canvas: HTMLCanvasElement): { x: number; y: number } {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -1043,16 +1082,16 @@ function convertPointerToCanvasPoint(event: PointerEvent, canvas: HTMLCanvasElem
   };
 }
 
-/** 必須要素を取得するにゃ。 */
+/** 必須要素を取得する。 */
 function requireElement<T extends Element>(rootElement: HTMLElement, selector: string): T {
   const element = rootElement.querySelector<T>(selector);
   if (!element) {
-    throw new Error(`必要な要素が見つからないにゃ: ${selector}`);
+    throw new Error(`必要な要素が見つかりません: ${selector}`);
   }
   return element;
 }
 
-/** Canvasの内容をPNGとして保存するにゃ。 */
+/** Canvasの内容をPNGとして保存する。 */
 function saveCanvasImage(canvas: HTMLCanvasElement, fileName: string): void {
   if (canvas.width === 0 || canvas.height === 0) {
     return;

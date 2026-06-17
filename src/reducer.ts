@@ -46,12 +46,12 @@ const SPRITE_TILE_MERGE_THRESHOLD_STEPS = [0, 6, 12, 18, 24, 32, 40] as const;
 const MAX_CONVERGENCE_ITERATIONS = 24;
 const UNUSED_PREVIEW_PIXEL: readonly [number, number, number] = [255, 0, 200];
 const EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES = new Set<number>([0x20, 0x2d, 0x3d]);
-const EFFECTIVE_FAMICOM_PALETTE_INDICES = buildEffectiveFamicomPaletteIndices();
 const LOW_BG_PALETTE_USAGE_CELL_THRESHOLD = 2;
 const LOW_BG_PALETTE_RESEED_MAX_PASSES = 3;
 const CHROMA_NEUTRAL_THRESHOLD = 18;
 
 interface FamicomReductionResult {
+  quantizedCanvas: HTMLCanvasElement;
   finalCanvas: HTMLCanvasElement;
   bgCanvas: HTMLCanvasElement;
   spriteCanvas: HTMLCanvasElement;
@@ -71,6 +71,8 @@ interface ReductionOptions {
   hueSimilarityDegrees: number;
   hueSimilarityWeight: number;
   quantizationMode: QuantizationMode;
+  excludeBrownQuantizationColors: boolean;
+  excludeGrayQuantizationColors: boolean;
   glitchPreviewEnabled: boolean;
 }
 
@@ -177,6 +179,7 @@ export function reduceFamicomImage(
   );
 
   return {
+    quantizedCanvas: renderIndexedImageCanvas(indexedImage),
     finalCanvas: renderedPreview.finalCanvas,
     bgCanvas: renderedPreview.bgCanvas,
     spriteCanvas: renderedPreview.spriteCanvas,
@@ -204,6 +207,23 @@ export function reduceFamicomImage(
       hardwareFindings: renderedPreview.hardwareFindings
     }
   };
+}
+
+/** 量子化直後の indexed image をCanvasへ描き起こすにゃ。 */
+function renderIndexedImageCanvas(indexedImage: IndexedImage): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = indexedImage.width;
+  canvas.height = indexedImage.height;
+  const context = require2dContext(canvas);
+  const imageData = context.createImageData(indexedImage.width, indexedImage.height);
+
+  for (let pixelIndex = 0; pixelIndex < indexedImage.pixels.length; pixelIndex += 1) {
+    const colorIndex = indexedImage.pixels[pixelIndex];
+    writePixel(imageData.data, pixelIndex, FAMICOM_PREVIEW_PALETTE[colorIndex], 255);
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
 }
 
 /** 制約を見ながら段階的に締めて最終プレビューを得るにゃ。 */
@@ -264,7 +284,8 @@ function quantizeCanvasToFamicomPalette(sourceCanvas: HTMLCanvasElement, options
       adjustedColor[0],
       adjustedColor[1],
       adjustedColor[2],
-      options.quantizationMode
+      options.quantizationMode,
+      options
     );
   }
 
@@ -2340,11 +2361,12 @@ function getNeighborTileKeys(tileX: number, tileY: number): string[] {
 }
 
 /** 近いパレット色番号を返すにゃ。 */
-function reduceToNearestPaletteIndex(red: number, green: number, blue: number, mode: QuantizationMode): number {
-  let bestIndex = EFFECTIVE_FAMICOM_PALETTE_INDICES[0] ?? DEFAULT_BACKGROUND_COLOR;
+function reduceToNearestPaletteIndex(red: number, green: number, blue: number, mode: QuantizationMode, options: ReductionOptions): number {
+  const effectivePaletteIndices = buildEffectiveFamicomPaletteIndices(options);
+  let bestIndex = effectivePaletteIndices[0] ?? DEFAULT_BACKGROUND_COLOR;
   let bestDistance = Number.POSITIVE_INFINITY;
 
-  for (const index of EFFECTIVE_FAMICOM_PALETTE_INDICES) {
+  for (const index of effectivePaletteIndices) {
     const candidate = FAMICOM_PREVIEW_PALETTE[index];
     const distance = mode === "luma-weighted"
       ? calculateLumaWeightedDistance(red, green, blue, candidate)
@@ -2360,12 +2382,26 @@ function reduceToNearestPaletteIndex(red: number, green: number, blue: number, m
 }
 
 /** 実用上の有効ファミコン色番号一覧を返すにゃ。 */
-function buildEffectiveFamicomPaletteIndices(): number[] {
+function buildEffectiveFamicomPaletteIndices(options: Pick<ReductionOptions, "excludeBrownQuantizationColors" | "excludeGrayQuantizationColors">): number[] {
   const seenColors = new Set<string>();
   const indices: number[] = [];
+  const optionalExclusions = new Set<number>();
+
+  if (options.excludeBrownQuantizationColors) {
+    optionalExclusions.add(0x08);
+    optionalExclusions.add(0x18);
+  }
+  if (options.excludeGrayQuantizationColors) {
+    optionalExclusions.add(0x00);
+    optionalExclusions.add(0x10);
+  }
 
   for (let index = 0; index < FAMICOM_PREVIEW_PALETTE.length; index += 1) {
-    if (index === FORBIDDEN_COLOR_INDEX || EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES.has(index)) {
+    if (
+      index === FORBIDDEN_COLOR_INDEX ||
+      EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES.has(index) ||
+      optionalExclusions.has(index)
+    ) {
       continue;
     }
 

@@ -40,6 +40,7 @@ export type RoiHandle =
 export interface AppState {
   sourceImage: HTMLImageElement | null;
   sourceCanvas: HTMLCanvasElement;
+  quantizedCanvas: HTMLCanvasElement;
   reducedCanvas: HTMLCanvasElement;
   bgCanvas: HTMLCanvasElement;
   spriteCanvas: HTMLCanvasElement;
@@ -53,8 +54,10 @@ export interface AppState {
   hueSimilarityDegrees: number;
   hueSimilarityWeight: number;
   quantizationMode: QuantizationMode;
+  excludeBrownQuantizationColors: boolean;
+  excludeGrayQuantizationColors: boolean;
   famicomAnalysis: FamicomAnalysis | null;
-  viewMode: "final" | "bg" | "bg0" | "bg1" | "bg2" | "bg3" | "sprite" | "source";
+  viewMode: "final" | "bg" | "bg0" | "bg1" | "bg2" | "bg3" | "quantized" | "sprite" | "source";
   showRoiOverlay: boolean;
 }
 
