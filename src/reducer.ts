@@ -47,6 +47,8 @@ const MAX_CONVERGENCE_ITERATIONS = 24;
 const UNUSED_PREVIEW_PIXEL: readonly [number, number, number] = [255, 0, 200];
 const EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES = new Set<number>([0x20, 0x2d, 0x3d]);
 const EFFECTIVE_FAMICOM_PALETTE_INDICES = buildEffectiveFamicomPaletteIndices();
+const LOW_BG_PALETTE_USAGE_CELL_THRESHOLD = 2;
+const LOW_BG_PALETTE_RESEED_MAX_PASSES = 3;
 
 interface FamicomReductionResult {
   finalCanvas: HTMLCanvasElement;
@@ -373,6 +375,16 @@ function solveBackgroundPalettes(
     assignment = assignPalettesToCells(cellAnalyses, bgSubPalettes, universalColor);
   }
 
+  for (let pass = 0; pass < LOW_BG_PALETTE_RESEED_MAX_PASSES; pass += 1) {
+    const improved = reseedLowUsageBgPalettes(cellAnalyses, assignment, bgSubPalettes, universalColor);
+    if (!improved) {
+      break;
+    }
+
+    bgSubPalettes = improved.bgSubPalettes;
+    assignment = improved.assignment;
+  }
+
   return {
     bgSubPalettes,
     assignment
@@ -495,6 +507,101 @@ function assignPalettesToCells(
   };
 }
 
+/** 低使用BGを未カバー色群で再シードし、改善した場合だけ採用するにゃ。 */
+function reseedLowUsageBgPalettes(
+  cellAnalyses: CellAnalysis[],
+  assignment: BgAssignmentResult,
+  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  universalColor: number
+):
+  | {
+      bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette];
+      assignment: BgAssignmentResult;
+    }
+  | null {
+  const assignmentCounts = new Uint16Array(BG_SUB_PALETTE_COUNT);
+  for (const cell of assignment.attributeCells) {
+    assignmentCounts[cell.paletteIndex] += 1;
+  }
+
+  const lowUsageIndices = [...assignmentCounts.entries()]
+    .filter(([, count]) => count <= LOW_BG_PALETTE_USAGE_CELL_THRESHOLD)
+    .map(([index]) => index);
+  if (lowUsageIndices.length === 0) {
+    return null;
+  }
+
+  const candidatePalettes = [...bgSubPalettes] as [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette];
+  let changed = false;
+  const reservedColors = new Set<number>();
+
+  for (const paletteIndex of lowUsageIndices) {
+    const reseeded = buildLowUsageBgPaletteSeed(cellAnalyses, assignment, universalColor, reservedColors);
+    if (reseeded.join(",") === candidatePalettes[paletteIndex].join(",")) {
+      continue;
+    }
+
+    candidatePalettes[paletteIndex] = reseeded;
+    for (const color of reseeded) {
+      reservedColors.add(color);
+    }
+    changed = true;
+  }
+
+  if (!changed) {
+    return null;
+  }
+
+  const candidateAssignment = assignPalettesToCells(cellAnalyses, candidatePalettes, universalColor);
+  if (calculateAssignmentCost(candidateAssignment) >= calculateAssignmentCost(assignment)) {
+    return null;
+  }
+
+  return {
+    bgSubPalettes: candidatePalettes,
+    assignment: candidateAssignment
+  };
+}
+
+/** 未カバー色群の重みから低使用BG向けの再シード3色を作るにゃ。 */
+function buildLowUsageBgPaletteSeed(
+  cellAnalyses: CellAnalysis[],
+  assignment: BgAssignmentResult,
+  universalColor: number,
+  reservedColors: Set<number>
+): FamicomSubPalette {
+  const deficitMap = new Map<number, number>();
+  const cellMap = new Map(cellAnalyses.map((cell) => [makeCellKey(cell.cellX, cell.cellY), cell]));
+
+  for (const assignedCell of assignment.attributeCells) {
+    const cellAnalysis = cellMap.get(makeCellKey(assignedCell.cellX, assignedCell.cellY));
+    if (!cellAnalysis) {
+      continue;
+    }
+
+    const allowedColors = new Set(assignedCell.supportedColors);
+    for (const [colorIndex, weight] of cellAnalysis.weightedFrequencyMap.entries()) {
+      if (colorIndex === universalColor || allowedColors.has(colorIndex)) {
+        continue;
+      }
+
+      deficitMap.set(colorIndex, (deficitMap.get(colorIndex) ?? 0) + weight);
+    }
+  }
+
+  const colors = [...deficitMap.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .filter(([color]) => !reservedColors.has(color))
+    .slice(0, SUB_PALETTE_COLOR_COUNT)
+    .map(([color]) => color);
+  return fillSubPalette(colors);
+}
+
+/** 属性セル割り当て結果の総コストを返すにゃ。 */
+function calculateAssignmentCost(assignment: BgAssignmentResult): number {
+  return assignment.attributeCells.reduce((total, cell) => total + cell.weightedScore + cell.missingPixelCount * 0.25, 0);
+}
+
 /** BG割り当て結果からプレビュー画像を描くにゃ。 */
 function renderFamicomPreview(
   indexedImage: IndexedImage,
@@ -603,7 +710,7 @@ function renderFamicomPreview(
     spriteClusterAnalyses,
     spriteSubPalettes
   );
-  consolidateBgTiles(bgImage, finalImage.data, finalSpriteMask, tuning);
+  consolidateBgTiles(bgImage, finalImage.data, finalSpriteMask, assignment.allowedByCell, tuning);
   if (glitchPreviewEnabled) {
     applyGlitchBgReferenceCorruption(bgImage, finalImage.data, finalSpriteMask, roi);
   }
@@ -730,6 +837,7 @@ function consolidateBgTiles(
   bgImage: ImageData,
   finalPixelData: Uint8ClampedArray,
   finalSpriteMask: Uint8Array,
+  allowedByCell: Map<string, FamicomAttributeCell>,
   tuning: ReductionTuning
 ): void {
   const tilesX = Math.ceil(bgImage.width / TILE_SIZE);
@@ -737,9 +845,11 @@ function consolidateBgTiles(
   const tileEntries = Array.from({ length: tilesX * tilesY }, (_, index) => {
     const tileX = index % tilesX;
     const tileY = Math.floor(index / tilesX);
+    const attributeCell = allowedByCell.get(makeCellKey(Math.floor(tileX / 2), Math.floor(tileY / 2)));
     return {
       tileX,
       tileY,
+      paletteIndex: attributeCell?.paletteIndex ?? -1,
       pixels: readTilePixels(bgImage, tileX, tileY)
     };
   });
@@ -749,13 +859,16 @@ function consolidateBgTiles(
     return;
   }
 
-  const representatives: Array<{ pixels: number[]; usageCount: number }> = [];
+  const representatives: Array<{ pixels: number[]; usageCount: number; paletteIndex: number }> = [];
 
   for (const tile of tileEntries) {
     let bestRepresentativeIndex = -1;
     let bestDistance = Number.POSITIVE_INFINITY;
 
     for (let index = 0; index < representatives.length; index += 1) {
+      if (representatives[index].paletteIndex !== tile.paletteIndex) {
+        continue;
+      }
       const distance = measureTileDistance(tile.pixels, representatives[index].pixels);
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -768,7 +881,7 @@ function consolidateBgTiles(
       (bestRepresentativeIndex === -1 || bestDistance > BG_TILE_MERGE_THRESHOLD_STEPS[tuning.bgMergeStepIndex]);
 
     if (canCreateNewRepresentative) {
-      representatives.push({ pixels: tile.pixels, usageCount: 1 });
+      representatives.push({ pixels: tile.pixels, usageCount: 1, paletteIndex: tile.paletteIndex });
       continue;
     }
 
@@ -901,6 +1014,9 @@ function analyzeBgPaletteUsage(
       }
 
       const usageMap = usageMaps[cell.paletteIndex];
+      if (!usageMap.has(colorIndex)) {
+        continue;
+      }
       usageMap.set(colorIndex, (usageMap.get(colorIndex) ?? 0) + 1);
     }
   }
