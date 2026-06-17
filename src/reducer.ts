@@ -1,7 +1,9 @@
 import type {
   FamicomAnalysis,
   FamicomAttributeCell,
+  FamicomBgTileColorStats,
   FamicomConvergenceStep,
+  FamicomPaletteUsageEntry,
   FamicomSpriteCandidate,
   FamicomSubPalette,
   FamicomTilePaletteSheet,
@@ -43,6 +45,8 @@ const BG_TILE_MERGE_THRESHOLD_STEPS = [0, 8, 16, 24, 32, 40, 56] as const;
 const SPRITE_TILE_MERGE_THRESHOLD_STEPS = [0, 6, 12, 18, 24, 32, 40] as const;
 const MAX_CONVERGENCE_ITERATIONS = 24;
 const UNUSED_PREVIEW_PIXEL: readonly [number, number, number] = [255, 0, 200];
+const EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES = new Set<number>([0x20, 0x2d, 0x3d]);
+const EFFECTIVE_FAMICOM_PALETTE_INDICES = buildEffectiveFamicomPaletteIndices();
 
 interface FamicomReductionResult {
   finalCanvas: HTMLCanvasElement;
@@ -92,6 +96,9 @@ interface RenderedPreview {
   totalBgTileCount: number;
   uniqueSpriteTileCount: number;
   totalSpriteTileCount: number;
+  bgTileColorStats: FamicomBgTileColorStats;
+  bgPaletteUsage: FamicomPaletteUsageEntry[][];
+  spritePaletteUsage: FamicomPaletteUsageEntry[][];
   unresolvedAttributeCellCount: number;
   unresolvedPixelCount: number;
   convergenceIterations: number;
@@ -181,6 +188,9 @@ export function reduceFamicomImage(
       totalBgTileCount: renderedPreview.totalBgTileCount,
       uniqueSpriteTileCount: renderedPreview.uniqueSpriteTileCount,
       totalSpriteTileCount: renderedPreview.totalSpriteTileCount,
+      bgTileColorStats: renderedPreview.bgTileColorStats,
+      bgPaletteUsage: renderedPreview.bgPaletteUsage,
+      spritePaletteUsage: renderedPreview.spritePaletteUsage,
       convergenceIterations: renderedPreview.convergenceIterations,
       convergenceHistory: renderedPreview.convergenceHistory,
       bgTilePaletteSheet: renderedPreview.bgTilePaletteSheet,
@@ -567,14 +577,23 @@ function renderFamicomPreview(
   const spriteTileAnalyses = analyzeSelectedSpriteTiles(indexedImage, spriteSelection.selectedTiles);
   const spriteClusterAnalyses = analyzeSpriteClusters(tightenedSpriteCandidates, spriteSelection.selectedTiles, spriteTileAnalyses);
   const spriteSubPalettes = solveSpriteSubPalettes(spriteClusterAnalyses);
-  recolorAcceptedSpritePixels(indexedImage, spriteImage.data, spriteSelection.selectedTiles, spriteClusterAnalyses, spriteSubPalettes);
+  const spritePaletteAssignments = assignSpritePalettes(spriteClusterAnalyses, spriteSubPalettes);
+  recolorAcceptedSpritePixels(
+    indexedImage,
+    spriteImage.data,
+    spriteSelection.selectedTiles,
+    spriteClusterAnalyses,
+    spriteSubPalettes,
+    spritePaletteAssignments
+  );
   compositeAcceptedSpritesIntoFinal(
     indexedImage,
     finalImage.data,
     finalSpriteMask,
     spriteSelection.selectedTiles,
     spriteClusterAnalyses,
-    spriteSubPalettes
+    spriteSubPalettes,
+    spritePaletteAssignments
   );
   consolidateSpriteTiles(spriteImage, finalImage.data, finalSpriteMask, spriteSelection.selectedTiles, tuning);
   spriteContext.putImageData(spriteImage, 0, 0);
@@ -592,6 +611,15 @@ function renderFamicomPreview(
   bgContext.putImageData(bgImage, 0, 0);
   const spriteTileStats = countUniqueSpriteTiles(spriteImage, spriteSelection.selectedTiles);
   const bgTileStats = countUniqueBgTiles(bgImage);
+  const bgTileColorStats = analyzeBgTileColorStats(bgImage, universalColor);
+  const bgPaletteUsage = analyzeBgPaletteUsage(bgImage, assignment.attributeCells, universalColor, bgSubPalettes);
+  const spritePaletteUsage = analyzeSpritePaletteUsage(
+    spriteImage,
+    spriteSelection.selectedTiles,
+    spriteClusterAnalyses,
+    spritePaletteAssignments,
+    spriteSubPalettes
+  );
   const bgTilePaletteSheet = buildBgTilePaletteSheet(bgImage);
   const spriteTilePaletteSheet = buildSpriteTilePaletteSheet(spriteImage, spriteSelection.selectedTiles);
   populateUnresolvedPixelCounts(assignment.attributeCells, spriteSelection.rejectedTiles);
@@ -612,6 +640,9 @@ function renderFamicomPreview(
     totalBgTileCount: bgTileStats.totalTileCount,
     uniqueSpriteTileCount: spriteTileStats.uniqueTileCount,
     totalSpriteTileCount: spriteTileStats.totalTileCount,
+    bgTileColorStats,
+    bgPaletteUsage,
+    spritePaletteUsage,
     unresolvedAttributeCellCount,
     unresolvedPixelCount,
     convergenceIterations,
@@ -778,6 +809,177 @@ function countUniqueBgTiles(bgImage: ImageData): { uniqueTileCount: number; tota
     uniqueTileCount: tileHashes.size,
     totalTileCount: tilesX * tilesY
   };
+}
+
+/** BGの8x8タイルが実際に何色使っているか集計するにゃ。 */
+function analyzeBgTileColorStats(
+  bgImage: ImageData,
+  universalColor: number
+): FamicomBgTileColorStats {
+  const stats: FamicomBgTileColorStats = {
+    oneColorTileCount: 0,
+    twoColorTileCount: 0,
+    threeColorTileCount: 0,
+    fourColorTileCount: 0,
+    universalColorUsedTileCount: 0
+  };
+  const tilesX = Math.ceil(bgImage.width / TILE_SIZE);
+  const tilesY = Math.ceil(bgImage.height / TILE_SIZE);
+
+  for (let tileY = 0; tileY < tilesY; tileY += 1) {
+    for (let tileX = 0; tileX < tilesX; tileX += 1) {
+      const tilePixels = readTilePixels(bgImage, tileX, tileY);
+      const usedColors = new Set<number>();
+      let usesUniversalColor = false;
+
+      for (let index = 0; index < tilePixels.length; index += 4) {
+        const paletteIndex = findPaletteIndexByRgb(
+          tilePixels[index],
+          tilePixels[index + 1],
+          tilePixels[index + 2]
+        );
+        if (paletteIndex === null) {
+          continue;
+        }
+
+        usedColors.add(paletteIndex);
+        if (paletteIndex === universalColor) {
+          usesUniversalColor = true;
+        }
+      }
+
+      switch (usedColors.size) {
+        case 0:
+        case 1:
+          stats.oneColorTileCount += 1;
+          break;
+        case 2:
+          stats.twoColorTileCount += 1;
+          break;
+        case 3:
+          stats.threeColorTileCount += 1;
+          break;
+        default:
+          stats.fourColorTileCount += 1;
+          break;
+      }
+
+      if (usesUniversalColor) {
+        stats.universalColorUsedTileCount += 1;
+      }
+    }
+  }
+
+  return stats;
+}
+
+/** BGパレットごとの利用ドット数を返すにゃ。 */
+function analyzeBgPaletteUsage(
+  bgImage: ImageData,
+  attributeCells: FamicomAttributeCell[],
+  universalColor: number,
+  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette]
+): FamicomPaletteUsageEntry[][] {
+  const usageMaps = bgSubPalettes.map((subPalette) => createPaletteUsageMap([universalColor, ...subPalette]));
+  const cellMap = new Map(attributeCells.map((cell) => [makeCellKey(cell.cellX, cell.cellY), cell]));
+
+  for (let y = 0; y < bgImage.height; y += 1) {
+    for (let x = 0; x < bgImage.width; x += 1) {
+      const cell = cellMap.get(makeCellKey(Math.floor(x / ATTRIBUTE_SIZE), Math.floor(y / ATTRIBUTE_SIZE)));
+      if (!cell) {
+        continue;
+      }
+
+      const pixelIndex = (y * bgImage.width + x) * 4;
+      const colorIndex = findPaletteIndexByRgb(
+        bgImage.data[pixelIndex],
+        bgImage.data[pixelIndex + 1],
+        bgImage.data[pixelIndex + 2]
+      );
+      if (colorIndex === null) {
+        continue;
+      }
+
+      const usageMap = usageMaps[cell.paletteIndex];
+      usageMap.set(colorIndex, (usageMap.get(colorIndex) ?? 0) + 1);
+    }
+  }
+
+  return usageMaps.map(convertPaletteUsageMapToEntries);
+}
+
+/** Spriteパレットごとの利用ドット数を返すにゃ。 */
+function analyzeSpritePaletteUsage(
+  spriteImage: ImageData,
+  selectedTiles: Map<string, SpriteTileCandidate>,
+  spriteClusterAnalyses: Map<string, SpriteClusterAnalysis>,
+  spritePaletteAssignments: Map<string, number>,
+  spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette]
+): FamicomPaletteUsageEntry[][] {
+  const usageMaps = spriteSubPalettes.map((subPalette) => createPaletteUsageMap(subPalette));
+  const tilePaletteIndexMap = new Map<string, number>();
+
+  for (const clusterAnalysis of spriteClusterAnalyses.values()) {
+    const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
+    for (const tileKey of clusterAnalysis.tileKeys) {
+      tilePaletteIndexMap.set(tileKey, paletteIndex);
+    }
+  }
+
+  for (const tile of selectedTiles.values()) {
+    const paletteIndex = tilePaletteIndexMap.get(makeCellKey(tile.tileX, tile.tileY));
+    if (paletteIndex === undefined) {
+      continue;
+    }
+
+    for (let y = tile.tileY * TILE_SIZE; y < Math.min(spriteImage.height, (tile.tileY + 1) * TILE_SIZE); y += 1) {
+      for (let x = tile.tileX * TILE_SIZE; x < Math.min(spriteImage.width, (tile.tileX + 1) * TILE_SIZE); x += 1) {
+        const pixelIndex = (y * spriteImage.width + x) * 4;
+        const colorIndex = findPaletteIndexByRgb(
+          spriteImage.data[pixelIndex],
+          spriteImage.data[pixelIndex + 1],
+          spriteImage.data[pixelIndex + 2]
+        );
+        if (colorIndex === null) {
+          continue;
+        }
+
+        const usageMap = usageMaps[paletteIndex];
+        if (!usageMap.has(colorIndex)) {
+          continue;
+        }
+
+        usageMap.set(colorIndex, (usageMap.get(colorIndex) ?? 0) + 1);
+      }
+    }
+  }
+
+  return usageMaps.map(convertPaletteUsageMapToEntries);
+}
+
+/** パレット利用数マップを初期化するにゃ。 */
+function createPaletteUsageMap(colors: number[]): Map<number, number> {
+  return new Map([...new Set(colors)].map((color) => [color, 0]));
+}
+
+/** パレット利用数マップを表示用配列へ変換するにゃ。 */
+function convertPaletteUsageMapToEntries(usageMap: Map<number, number>): FamicomPaletteUsageEntry[] {
+  return [...usageMap.entries()].map(([colorIndex, pixelCount]) => ({
+    colorIndex,
+    pixelCount
+  }));
+}
+
+/** RGB値からファミコンパレット番号を逆引きするにゃ。 */
+function findPaletteIndexByRgb(red: number, green: number, blue: number): number | null {
+  for (let index = 0; index < FAMICOM_PREVIEW_PALETTE.length; index += 1) {
+    const color = FAMICOM_PREVIEW_PALETTE[index];
+    if (color[0] === red && color[1] === green && color[2] === blue) {
+      return index;
+    }
+  }
+
+  return null;
 }
 
 /** 最終生成後にROI外のBG参照番地を規則的にずらすにゃ。 */
@@ -1376,10 +1578,11 @@ function compositeAcceptedSpritesIntoFinal(
   finalSpriteMask: Uint8Array,
   selectedTiles: Map<string, SpriteTileCandidate>,
   spriteClusterAnalyses: Map<string, SpriteClusterAnalysis>,
-  spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette]
+  spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  spritePaletteAssignments: Map<string, number>
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
-    const paletteIndex = chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
+    const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
     const palette = spriteSubPalettes[paletteIndex];
 
     for (const tileKey of clusterAnalysis.tileKeys) {
@@ -1698,10 +1901,11 @@ function recolorAcceptedSpritePixels(
   spritePixelData: Uint8ClampedArray,
   selectedTiles: Map<string, SpriteTileCandidate>,
   spriteClusterAnalyses: Map<string, SpriteClusterAnalysis>,
-  spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette]
+  spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  spritePaletteAssignments: Map<string, number>
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
-    const paletteIndex = chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
+    const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
     const palette = spriteSubPalettes[paletteIndex];
 
     for (const tileKey of clusterAnalysis.tileKeys) {
@@ -1913,14 +2117,10 @@ function getNeighborTileKeys(tileX: number, tileY: number): string[] {
 
 /** 近いパレット色番号を返すにゃ。 */
 function reduceToNearestPaletteIndex(red: number, green: number, blue: number, mode: QuantizationMode): number {
-  let bestIndex = 0;
+  let bestIndex = EFFECTIVE_FAMICOM_PALETTE_INDICES[0] ?? DEFAULT_BACKGROUND_COLOR;
   let bestDistance = Number.POSITIVE_INFINITY;
 
-  for (let index = 0; index < FAMICOM_PREVIEW_PALETTE.length; index += 1) {
-    if (index === FORBIDDEN_COLOR_INDEX) {
-      continue;
-    }
-
+  for (const index of EFFECTIVE_FAMICOM_PALETTE_INDICES) {
     const candidate = FAMICOM_PREVIEW_PALETTE[index];
     const distance = mode === "luma-weighted"
       ? calculateLumaWeightedDistance(red, green, blue, candidate)
@@ -1933,6 +2133,29 @@ function reduceToNearestPaletteIndex(red: number, green: number, blue: number, m
   }
 
   return bestIndex;
+}
+
+/** 実用上の有効ファミコン色番号一覧を返すにゃ。 */
+function buildEffectiveFamicomPaletteIndices(): number[] {
+  const seenColors = new Set<string>();
+  const indices: number[] = [];
+
+  for (let index = 0; index < FAMICOM_PREVIEW_PALETTE.length; index += 1) {
+    if (index === FORBIDDEN_COLOR_INDEX || EXCLUDED_EFFECTIVE_FAMICOM_COLOR_INDICES.has(index)) {
+      continue;
+    }
+
+    const color = FAMICOM_PREVIEW_PALETTE[index];
+    const key = `${color[0]},${color[1]},${color[2]}`;
+    if (seenColors.has(key)) {
+      continue;
+    }
+
+    seenColors.add(key);
+    indices.push(index);
+  }
+
+  return indices;
 }
 
 /** 入力色へ明度・コントラスト・彩度を適用するにゃ。 */

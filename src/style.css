@@ -209,6 +209,54 @@ h2 {
   margin-top: 6px;
 }
 
+.palette-usage-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.palette-usage-block {
+  display: grid;
+  gap: 6px;
+}
+
+.palette-usage-label {
+  margin: 0;
+  font-weight: 700;
+}
+
+.palette-usage-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 6px;
+}
+
+.palette-usage-cell {
+  padding: 6px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.palette-usage-code,
+.palette-usage-hex,
+.palette-usage-rgb,
+.palette-usage-count {
+  margin: 0;
+}
+
+.palette-usage-code {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.palette-usage-hex,
+.palette-usage-rgb,
+.palette-usage-count {
+  font-size: 0.82rem;
+}
+
 details + details {
   margin-top: 12px;
 }

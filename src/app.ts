@@ -8,6 +8,24 @@ import type { AppState, FamicomSubPalette, QuantizationMode, RegionOfInterest } 
 const FAMICOM_SCREEN_WIDTH = 256;
 const FAMICOM_SCREEN_HEIGHT = 240;
 const UNUSED_PREVIEW_COLOR = "#ff00c8";
+const FAMICOM_DISPLAY_PALETTE: ReadonlyArray<readonly [number, number, number]> = [
+  [124, 124, 124], [0, 0, 252], [0, 0, 188], [68, 40, 188],
+  [148, 0, 132], [168, 0, 32], [168, 16, 0], [136, 20, 0],
+  [80, 48, 0], [0, 120, 0], [0, 104, 0], [0, 88, 0],
+  [0, 64, 88], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+  [188, 188, 188], [0, 120, 248], [0, 88, 248], [104, 68, 252],
+  [216, 0, 204], [228, 0, 88], [248, 56, 0], [228, 92, 16],
+  [172, 124, 0], [0, 184, 0], [0, 168, 0], [0, 168, 68],
+  [0, 136, 136], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+  [248, 248, 248], [60, 188, 252], [104, 136, 252], [152, 120, 248],
+  [248, 120, 248], [248, 88, 152], [248, 120, 88], [252, 160, 68],
+  [248, 184, 0], [184, 248, 24], [88, 216, 84], [88, 248, 152],
+  [0, 232, 216], [120, 120, 120], [0, 0, 0], [0, 0, 0],
+  [252, 252, 252], [164, 228, 252], [184, 184, 248], [216, 184, 248],
+  [248, 184, 248], [248, 164, 192], [240, 208, 176], [252, 224, 168],
+  [248, 216, 120], [216, 248, 120], [184, 248, 184], [184, 248, 216],
+  [0, 252, 252], [248, 216, 248], [0, 0, 0], [0, 0, 0]
+] as const;
 
 /** アプリ本体を構築するにゃ。 */
 export function bootstrapApp(rootElement: HTMLElement): void {
@@ -546,6 +564,12 @@ function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["fami
       return `<div class="palette-block"><p class="info-line">SP${index}: ${chips}</p></div>`;
     })
     .join("");
+  const bgUsageBlocks = analysis.bgPaletteUsage
+    .map((entries, index) => renderPaletteUsageBlock(`BG${index}`, entries))
+    .join("");
+  const spriteUsageBlocks = analysis.spritePaletteUsage
+    .map((entries, index) => renderPaletteUsageBlock(`SP${index}`, entries))
+    .join("");
 
   const hotspotCells = [...analysis.attributeCells]
     .sort((left, right) => {
@@ -579,10 +603,16 @@ function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["fami
     <p class="info-line">Universal background color: ${universalColor}</p>
     <p class="info-line">BGユニーク8x8タイル数: ${analysis.uniqueBgTileCount} / ${analysis.totalBgTileCount}</p>
     <p class="info-line">Spriteユニーク8x8タイル数: ${analysis.uniqueSpriteTileCount} / ${analysis.totalSpriteTileCount}</p>
+    <p class="info-line">BG 8x8色数内訳: 1色 ${analysis.bgTileColorStats.oneColorTileCount} / 2色 ${analysis.bgTileColorStats.twoColorTileCount} / 3色 ${analysis.bgTileColorStats.threeColorTileCount} / 4色 ${analysis.bgTileColorStats.fourColorTileCount}</p>
+    <p class="info-line">Universal color を使っているBG 8x8タイル数: ${analysis.bgTileColorStats.universalColorUsedTileCount} / ${analysis.totalBgTileCount}</p>
     <p class="info-line">ファミコンは BG0-BG3 ごとの枚数上限はなく、属性セル割り当てと総タイル数を見るのが大事にゃ。</p>
     ${paletteLines}
+    <p class="info-line">BGパレット利用ドット数</p>
+    <div class="palette-usage-grid">${bgUsageBlocks}</div>
     <p class="info-line">Spriteパレット</p>
     ${spritePaletteLines}
+    <p class="info-line">Spriteパレット利用ドット数</p>
+    <div class="palette-usage-grid">${spriteUsageBlocks}</div>
     <p class="info-line">BGタブの見方: 白グリッドは16x16属性セル、ラベルは割り当てBGパレット、赤みセルはSprite補完ありにゃ。</p>
     <p class="info-line">BG0-BG3タブでは、そのパレット担当セルだけ明るく確認できるにゃ。</p>
     <p class="info-line">重点属性セル</p>
@@ -632,6 +662,53 @@ function renderSpriteInfo(container: HTMLDivElement, analysis: AppState["famicom
     <p class="info-line">SP0-SP3 は採用候補の色分布から自動生成した暫定パレットにゃ。</p>
     <ul class="info-list">${topCandidates || "<li>候補なしにゃ。</li>"}</ul>
   `;
+}
+
+/** パレット利用ドット数ブロックを描画するにゃ。 */
+function renderPaletteUsageBlock(label: string, entries: Array<{ colorIndex: number; pixelCount: number }>): string {
+  const cells = entries
+    .map((entry) => {
+      const rgb = getFamicomColorRgb(entry.colorIndex);
+      const hex = formatFamicomRgbHex(entry.colorIndex);
+      const colorCode = `$${entry.colorIndex.toString(16).toUpperCase().padStart(2, "0")}`;
+      const textColor = getReadableTextColor(rgb[0], rgb[1], rgb[2]);
+      const rgbLabel = `${rgb[0]} ${rgb[1]} ${rgb[2]}`;
+      return `
+        <div class="palette-usage-cell" style="background:rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]});color:${textColor};">
+          <p class="palette-usage-code">${colorCode}</p>
+          <p class="palette-usage-hex">${hex}</p>
+          <p class="palette-usage-rgb">${rgbLabel}</p>
+          <p class="palette-usage-count">${entry.pixelCount} px</p>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="palette-usage-block">
+      <p class="palette-usage-label">${label}</p>
+      <div class="palette-usage-cells">
+        ${cells}
+      </div>
+    </div>
+  `;
+}
+
+/** 指定色の上で見やすい文字色を返すにゃ。 */
+function getReadableTextColor(red: number, green: number, blue: number): string {
+  const luma = red * 0.299 + green * 0.587 + blue * 0.114;
+  return luma >= 150 ? "#111111" : "#f8f4ea";
+}
+
+/** ファミコン色番号に対応するRGBを返すにゃ。 */
+function getFamicomColorRgb(colorIndex: number): readonly [number, number, number] {
+  return FAMICOM_DISPLAY_PALETTE[colorIndex] ?? [0, 0, 0];
+}
+
+/** ファミコン色番号をRGB16進表記へ整形するにゃ。 */
+function formatFamicomRgbHex(colorIndex: number): string {
+  const rgb = getFamicomColorRgb(colorIndex);
+  return `#${rgb.map((value) => value.toString(16).toUpperCase().padStart(2, "0")).join("")}`;
 }
 
 /** 警告情報を描画するにゃ。 */

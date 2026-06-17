@@ -115,6 +115,21 @@ export interface FamicomConvergenceStep {
   scanlineOverflowCount: number;
 }
 
+/** BGの8x8タイル色数統計にゃ。 */
+export interface FamicomBgTileColorStats {
+  oneColorTileCount: number;
+  twoColorTileCount: number;
+  threeColorTileCount: number;
+  fourColorTileCount: number;
+  universalColorUsedTileCount: number;
+}
+
+/** パレット内1色ぶんの利用統計にゃ。 */
+export interface FamicomPaletteUsageEntry {
+  colorIndex: number;
+  pixelCount: number;
+}
+
 /** ファミコン解析結果を表す型にゃ。 */
 export interface FamicomAnalysis {
   universalColor: number;
@@ -129,6 +144,9 @@ export interface FamicomAnalysis {
   totalBgTileCount: number;
   uniqueSpriteTileCount: number;
   totalSpriteTileCount: number;
+  bgTileColorStats: FamicomBgTileColorStats;
+  bgPaletteUsage: FamicomPaletteUsageEntry[][];
+  spritePaletteUsage: FamicomPaletteUsageEntry[][];
   convergenceIterations: number;
   convergenceHistory: FamicomConvergenceStep[];
   bgTilePaletteSheet: FamicomTilePaletteSheet;
