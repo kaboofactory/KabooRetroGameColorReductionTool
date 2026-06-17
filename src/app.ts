@@ -1,5 +1,5 @@
 import "./style.css";
-import { getImageFileFromPasteEvent, loadImageFromFile } from "./image-loader";
+import { getImageFileFromPasteEvent, loadImageFromFile, readImageFileFromClipboardApi } from "./image-loader";
 import { getMachineProfile } from "./machines";
 import { reduceFamicomImage } from "./reducer";
 import { RoiManager } from "./roi-manager";
@@ -7,6 +7,7 @@ import type { AppState, FamicomSubPalette, QuantizationMode, RegionOfInterest } 
 
 const FAMICOM_SCREEN_WIDTH = 256;
 const FAMICOM_SCREEN_HEIGHT = 240;
+const UNUSED_PREVIEW_COLOR = "#ff00c8";
 
 /** アプリ本体を構築するにゃ。 */
 export function bootstrapApp(rootElement: HTMLElement): void {
@@ -29,6 +30,7 @@ function createInitialState(): AppState {
     spriteCanvas: document.createElement("canvas"),
     roi: null,
     roiEnabled: true,
+    glitchPreviewEnabled: false,
     detailWeight: 2,
     brightness: 0,
     contrast: 0,
@@ -64,6 +66,7 @@ function createAppMarkup(): string {
             <span>ROIのディテール優先度</span>
             <input id="detailWeightInput" type="range" min="1" max="4" step="0.5" value="2" />
           </label>
+          <p class="hint">ROIは「この範囲をできるだけ細かく残したい」という優先範囲にゃ。ROI内は BG / Sprite の配分でディテールを優先しやすくなるにゃ。</p>
           <label class="field">
             <span>明度</span>
             <input id="brightnessInput" type="range" min="-100" max="100" step="1" value="0" />
@@ -88,10 +91,14 @@ function createAppMarkup(): string {
               <input id="roiEnabledInput" type="checkbox" checked />
               <span>ROIを有効にする</span>
             </label>
+            <label class="checkbox">
+              <input id="glitchPreviewEnabledInput" type="checkbox" />
+              <span>バグ画像再現</span>
+            </label>
             <button id="clearRoiButton" class="secondary-button" type="button">ROIクリア</button>
           </div>
           <div class="inline-row">
-            <button id="recalculateButton" class="secondary-button" type="button">生成</button>
+            <button id="recalculateButton" class="primary-button" type="button">生成</button>
           </div>
         </div>
       </section>
@@ -117,7 +124,7 @@ function createAppMarkup(): string {
           <button id="saveBgButton" class="secondary-button" type="button">BG画像を保存</button>
           <button id="saveSpriteButton" class="secondary-button" type="button">Sprite画像を保存</button>
         </div>
-        <p class="hint">画像上をドラッグすると、ディテール優先範囲を1つだけ指定できるにゃ。最終画像は BG と採用Sprite を合成した実用プレビューにゃ。</p>
+        <p class="hint">画像上をドラッグすると、ROIを1つだけ指定できるにゃ。ROIはタイル単位に丸められ、その範囲はできるだけディテールを残す方向で変換するにゃ。最終画像は BG と採用Sprite を合成した実用プレビューにゃ。</p>
       </section>
 
       <section class="card">
@@ -161,6 +168,7 @@ function queryElements(rootElement: HTMLElement) {
     saturationInput: requireElement<HTMLInputElement>(rootElement, "#saturationInput"),
     quantizationModeInput: requireElement<HTMLSelectElement>(rootElement, "#quantizationModeInput"),
     roiEnabledInput: requireElement<HTMLInputElement>(rootElement, "#roiEnabledInput"),
+    glitchPreviewEnabledInput: requireElement<HTMLInputElement>(rootElement, "#glitchPreviewEnabledInput"),
     clearRoiButton: requireElement<HTMLButtonElement>(rootElement, "#clearRoiButton"),
     saveFinalButton: requireElement<HTMLButtonElement>(rootElement, "#saveFinalButton"),
     saveBgButton: requireElement<HTMLButtonElement>(rootElement, "#saveBgButton"),
@@ -200,13 +208,15 @@ function bindEvents(
   });
 
   document.addEventListener("paste", async (event) => {
-    const imageFile = getImageFileFromPasteEvent(event);
+    const imageFile = getImageFileFromPasteEvent(event) ?? await readImageFileFromClipboardApi();
     if (!imageFile) {
       return;
     }
 
     event.preventDefault();
     await updateSourceImage(imageFile, state, elements);
+    rerenderReduction(state);
+    renderAll(elements, state);
   });
 
   elements.detailWeightInput.addEventListener("input", () => {
@@ -242,6 +252,11 @@ function bindEvents(
     if (state.roi) {
       state.roi.enabled = state.roiEnabled;
     }
+    renderAll(elements, state);
+  });
+
+  elements.glitchPreviewEnabledInput.addEventListener("change", () => {
+    state.glitchPreviewEnabled = elements.glitchPreviewEnabledInput.checked;
     renderAll(elements, state);
   });
 
@@ -358,7 +373,8 @@ function rerenderReduction(state: AppState): void {
     brightness: state.brightness,
     contrast: state.contrast,
     saturation: state.saturation,
-    quantizationMode: state.quantizationMode
+    quantizationMode: state.quantizationMode,
+    glitchPreviewEnabled: state.glitchPreviewEnabled
   });
   state.reducedCanvas = result.finalCanvas;
   state.bgCanvas = result.bgCanvas;
@@ -376,6 +392,7 @@ function renderAll(elements: ReturnType<typeof queryElements>, state: AppState):
   elements.saturationInput.value = String(state.saturation);
   elements.quantizationModeInput.value = state.quantizationMode;
   elements.roiEnabledInput.checked = state.roiEnabled;
+  elements.glitchPreviewEnabledInput.checked = state.glitchPreviewEnabled;
   elements.viewFinalButton.classList.toggle("is-active", state.viewMode === "final");
   elements.viewBg0Button.classList.toggle("is-active", state.viewMode === "bg0");
   elements.viewBg1Button.classList.toggle("is-active", state.viewMode === "bg1");
@@ -610,7 +627,7 @@ function renderSpriteInfo(container: HTMLDivElement, analysis: AppState["famicom
     <p class="info-line">ROI優先候補数: ${analysis.spriteCandidates.filter((candidate) => candidate.overlapsRoi).length}</p>
     <p class="info-line">採用された8x8スプライト数: ${analysis.spriteCandidates.reduce((total, candidate) => total + candidate.spriteCount, 0)}</p>
     <p class="info-line">落選した8x8スプライト数: ${analysis.rejectedSpriteTiles.length}</p>
-    <p class="info-line">Sprite表示の見方: 採用部分はSPパレット色、緑枠は採用、赤バツは走査線制限で落選にゃ。</p>
+    <p class="info-line">Sprite表示の見方: 採用されたスプライト画素だけを表示し、スプライトがない場所は黒で埋めるにゃ。</p>
     <p class="info-line">SP0-SP3 は採用候補の色分布から自動生成した暫定パレットにゃ。</p>
     <ul class="info-list">${topCandidates || "<li>候補なしにゃ。</li>"}</ul>
   `;
@@ -835,7 +852,7 @@ function createBgPaletteFocusCanvas(
   }
 
   context.drawImage(bgCanvas, 0, 0);
-  context.fillStyle = "#000000";
+  context.fillStyle = UNUSED_PREVIEW_COLOR;
 
   for (const cell of analysis.attributeCells) {
     if (cell.paletteIndex === paletteIndex) {

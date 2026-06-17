@@ -42,6 +42,7 @@ const TILE_SHEET_COLUMNS = 16;
 const BG_TILE_MERGE_THRESHOLD_STEPS = [0, 8, 16, 24, 32, 40, 56] as const;
 const SPRITE_TILE_MERGE_THRESHOLD_STEPS = [0, 6, 12, 18, 24, 32, 40] as const;
 const MAX_CONVERGENCE_ITERATIONS = 24;
+const UNUSED_PREVIEW_PIXEL: readonly [number, number, number] = [255, 0, 200];
 
 interface FamicomReductionResult {
   finalCanvas: HTMLCanvasElement;
@@ -61,6 +62,7 @@ interface ReductionOptions {
   contrast: number;
   saturation: number;
   quantizationMode: QuantizationMode;
+  glitchPreviewEnabled: boolean;
 }
 
 interface CellAnalysis {
@@ -158,7 +160,8 @@ export function reduceFamicomImage(
     bgAnalysis.universalColor,
     bgAnalysis.bgSubPalettes,
     bgAnalysis.assignment,
-    weightedRoi
+    weightedRoi,
+    options.glitchPreviewEnabled
   );
 
   return {
@@ -194,7 +197,8 @@ function convergeFamicomPreview(
   universalColor: number,
   bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
   assignment: BgAssignmentResult,
-  roi: RegionOfInterest | null
+  roi: RegionOfInterest | null,
+  glitchPreviewEnabled: boolean
 ): RenderedPreview {
   const tuning: ReductionTuning = {
     bgMergeStepIndex: 0,
@@ -204,7 +208,7 @@ function convergeFamicomPreview(
     allowRoiSpriteCandidateRemoval: false
   };
   const convergenceHistory: FamicomConvergenceStep[] = [];
-  let bestPreview = renderFamicomPreview(indexedImage, universalColor, bgSubPalettes, assignment, roi, tuning, 1);
+  let bestPreview = renderFamicomPreview(indexedImage, universalColor, bgSubPalettes, assignment, roi, tuning, 1, glitchPreviewEnabled);
   convergenceHistory.push(buildConvergenceStep(bestPreview));
 
   for (let iteration = 0; iteration < MAX_CONVERGENCE_ITERATIONS; iteration += 1) {
@@ -219,7 +223,7 @@ function convergeFamicomPreview(
       return bestPreview;
     }
 
-    bestPreview = renderFamicomPreview(indexedImage, universalColor, bgSubPalettes, assignment, roi, tuning, iteration + 2);
+    bestPreview = renderFamicomPreview(indexedImage, universalColor, bgSubPalettes, assignment, roi, tuning, iteration + 2, glitchPreviewEnabled);
     convergenceHistory.push(buildConvergenceStep(bestPreview));
   }
 
@@ -489,7 +493,8 @@ function renderFamicomPreview(
   assignment: BgAssignmentResult,
   roi: RegionOfInterest | null,
   tuning: ReductionTuning,
-  convergenceIterations: number
+  convergenceIterations: number,
+  glitchPreviewEnabled: boolean
 ): RenderedPreview {
   const finalCanvas = document.createElement("canvas");
   const bgCanvas = document.createElement("canvas");
@@ -540,7 +545,7 @@ function renderFamicomPreview(
       writePixel(bgImage.data, pixelIndex, FAMICOM_PREVIEW_PALETTE[finalColor], 255);
 
       if (isBgSupported && !roiForcesSprite) {
-        writePixel(spriteImage.data, pixelIndex, [0, 0, 0], 0);
+        writePixel(spriteImage.data, pixelIndex, UNUSED_PREVIEW_PIXEL, 255);
         continue;
       }
 
@@ -558,6 +563,7 @@ function renderFamicomPreview(
 
   const tightenedSpriteCandidates = tightenSpriteCandidatesToFit(indexedImage.height, spriteCandidates, tuning);
   const spriteSelection = selectSpriteTiles(indexedImage.height, tightenedSpriteCandidates);
+  clearNonSelectedSpritePixels(indexedImage, spriteImage.data, spriteSelection.selectedTiles);
   const spriteTileAnalyses = analyzeSelectedSpriteTiles(indexedImage, spriteSelection.selectedTiles);
   const spriteClusterAnalyses = analyzeSpriteClusters(tightenedSpriteCandidates, spriteSelection.selectedTiles, spriteTileAnalyses);
   const spriteSubPalettes = solveSpriteSubPalettes(spriteClusterAnalyses);
@@ -572,8 +578,6 @@ function renderFamicomPreview(
   );
   consolidateSpriteTiles(spriteImage, finalImage.data, finalSpriteMask, spriteSelection.selectedTiles, tuning);
   spriteContext.putImageData(spriteImage, 0, 0);
-  drawAcceptedSpriteTiles(spriteContext, spriteSelection.selectedTiles);
-  drawRejectedSpriteTiles(spriteContext, spriteSelection.rejectedTiles);
   const sortedSpriteCandidates = buildGroupedSpriteCandidates(
     tightenedSpriteCandidates,
     spriteSelection.selectedTiles,
@@ -581,6 +585,9 @@ function renderFamicomPreview(
     spriteSubPalettes
   );
   consolidateBgTiles(bgImage, finalImage.data, finalSpriteMask, tuning);
+  if (glitchPreviewEnabled) {
+    applyGlitchBgReferenceCorruption(bgImage, finalImage.data, finalSpriteMask, roi);
+  }
   finalContext.putImageData(finalImage, 0, 0);
   bgContext.putImageData(bgImage, 0, 0);
   const spriteTileStats = countUniqueSpriteTiles(spriteImage, spriteSelection.selectedTiles);
@@ -773,6 +780,67 @@ function countUniqueBgTiles(bgImage: ImageData): { uniqueTileCount: number; tota
   };
 }
 
+/** 最終生成後にROI外のBG参照番地を規則的にずらすにゃ。 */
+function applyGlitchBgReferenceCorruption(
+  bgImage: ImageData,
+  finalPixelData: Uint8ClampedArray,
+  finalSpriteMask: Uint8Array,
+  roi: RegionOfInterest | null
+): void {
+  const tilesX = Math.ceil(bgImage.width / TILE_SIZE);
+  const tilesY = Math.ceil(bgImage.height / TILE_SIZE);
+  const bgAddressMap = buildBgAddressMap(bgImage);
+
+  for (let tileY = 0; tileY < tilesY; tileY += 1) {
+    const addressOffset = getGlitchAddressOffset(tileY, bgAddressMap.uniqueTiles.length);
+
+    for (let tileX = 0; tileX < tilesX; tileX += 1) {
+      if (doesTileOverlapRoi(tileX, tileY, roi)) {
+        continue;
+      }
+
+      const targetAddress = bgAddressMap.tileAddresses[tileY * tilesX + tileX];
+      const sourceAddress = wrapTileAddress(targetAddress + addressOffset, bgAddressMap.uniqueTiles.length);
+      const sourcePixels = bgAddressMap.uniqueTiles[sourceAddress];
+
+      writeTilePixels(bgImage, tileX, tileY, sourcePixels);
+      writeTilePixelsToFinal(bgImage.width, finalPixelData, finalSpriteMask, tileX, tileY, sourcePixels);
+    }
+  }
+}
+
+/** 現在のBG画像から使用中番地表を作るにゃ。 */
+function buildBgAddressMap(bgImage: ImageData): { uniqueTiles: number[][]; tileAddresses: number[] } {
+  const tilesX = Math.ceil(bgImage.width / TILE_SIZE);
+  const tilesY = Math.ceil(bgImage.height / TILE_SIZE);
+  const uniqueTiles: number[][] = [];
+  const tileAddresses: number[] = [];
+  const addressByHash = new Map<string, number>();
+
+  for (let tileY = 0; tileY < tilesY; tileY += 1) {
+    for (let tileX = 0; tileX < tilesX; tileX += 1) {
+      const pixels = readTilePixels(bgImage, tileX, tileY);
+      const hash = pixels.join(",");
+      const existingAddress = addressByHash.get(hash);
+
+      if (existingAddress !== undefined) {
+        tileAddresses.push(existingAddress);
+        continue;
+      }
+
+      const newAddress = uniqueTiles.length;
+      uniqueTiles.push(pixels);
+      tileAddresses.push(newAddress);
+      addressByHash.set(hash, newAddress);
+    }
+  }
+
+  return {
+    uniqueTiles,
+    tileAddresses
+  };
+}
+
 /** BGのユニーク8x8タイルを番地順シートへ並べるにゃ。 */
 function buildBgTilePaletteSheet(bgImage: ImageData): FamicomTilePaletteSheet {
   const tilesX = Math.ceil(bgImage.width / TILE_SIZE);
@@ -861,6 +929,45 @@ function writeTilePixelsToFinal(
       sourceIndex += 4;
     }
   }
+}
+
+/** 指定8x8タイルがROIへ触れているか返すにゃ。 */
+function doesTileOverlapRoi(tileX: number, tileY: number, roi: RegionOfInterest | null): boolean {
+  if (!roi || !roi.enabled) {
+    return false;
+  }
+
+  const left = tileX * TILE_SIZE;
+  const top = tileY * TILE_SIZE;
+  const right = left + TILE_SIZE;
+  const bottom = top + TILE_SIZE;
+
+  return left < roi.x + roi.width && right > roi.x && top < roi.y + roi.height && bottom > roi.y;
+}
+
+/** 行単位で使う番地オフセットを返すにゃ。 */
+function getGlitchAddressOffset(tileRow: number, totalTileCount: number): number {
+  const baseStride = 7;
+  const bandIndex = tileRow % 4;
+
+  switch (bandIndex) {
+    case 0:
+      return baseStride;
+    case 1:
+      return -baseStride;
+    case 2:
+      return baseStride * 2;
+    case 3:
+      return -(Math.max(3, Math.floor(totalTileCount / 29)));
+    default:
+      return baseStride;
+  }
+}
+
+/** タイル番地を範囲内へループさせるにゃ。 */
+function wrapTileAddress(value: number, totalTileCount: number): number {
+  const remainder = value % totalTileCount;
+  return remainder < 0 ? remainder + totalTileCount : remainder;
 }
 
 /** 2つのタイルの平均色差を返すにゃ。 */
@@ -1617,49 +1724,25 @@ function recolorAcceptedSpritePixels(
   }
 }
 
-/** 採用された8x8スプライト候補をSpriteプレビューへ重ね描きするにゃ。 */
-function drawAcceptedSpriteTiles(
-  context: CanvasRenderingContext2D,
-  acceptedTiles: Map<string, SpriteTileCandidate>
+/** 採用されなかったSprite候補画素を黒で消すにゃ。 */
+function clearNonSelectedSpritePixels(
+  indexedImage: IndexedImage,
+  spritePixelData: Uint8ClampedArray,
+  selectedTiles: Map<string, SpriteTileCandidate>
 ): void {
-  context.save();
-  context.strokeStyle = "rgba(96, 255, 160, 0.7)";
-  context.lineWidth = 1;
+  for (let tileY = 0; tileY < Math.ceil(indexedImage.height / TILE_SIZE); tileY += 1) {
+    for (let tileX = 0; tileX < Math.ceil(indexedImage.width / TILE_SIZE); tileX += 1) {
+      if (selectedTiles.has(makeCellKey(tileX, tileY))) {
+        continue;
+      }
 
-  for (const tile of acceptedTiles.values()) {
-    const x = tile.tileX * TILE_SIZE + 0.5;
-    const y = tile.tileY * TILE_SIZE + 0.5;
-    const size = TILE_SIZE - 1;
-    context.strokeRect(x, y, size, size);
+      for (let y = tileY * TILE_SIZE; y < Math.min(indexedImage.height, (tileY + 1) * TILE_SIZE); y += 1) {
+        for (let x = tileX * TILE_SIZE; x < Math.min(indexedImage.width, (tileX + 1) * TILE_SIZE); x += 1) {
+          writePixel(spritePixelData, y * indexedImage.width + x, UNUSED_PREVIEW_PIXEL, 255);
+        }
+      }
+    }
   }
-
-  context.restore();
-}
-
-/** 落選した8x8スプライト候補をSpriteプレビューへ重ね描きするにゃ。 */
-function drawRejectedSpriteTiles(
-  context: CanvasRenderingContext2D,
-  rejectedTiles: Map<string, SpriteTileCandidate>
-): void {
-  context.save();
-  context.strokeStyle = "rgba(255, 80, 80, 0.95)";
-  context.lineWidth = 1;
-
-  for (const tile of rejectedTiles.values()) {
-    const x = tile.tileX * TILE_SIZE + 0.5;
-    const y = tile.tileY * TILE_SIZE + 0.5;
-    const size = TILE_SIZE - 1;
-
-    context.strokeRect(x, y, size, size);
-    context.beginPath();
-    context.moveTo(x, y);
-    context.lineTo(x + size, y + size);
-    context.moveTo(x + size, y);
-    context.lineTo(x, y + size);
-    context.stroke();
-  }
-
-  context.restore();
 }
 
 /** 隣接不足タイルをまとめてスプライト候補一覧へ変換するにゃ。 */

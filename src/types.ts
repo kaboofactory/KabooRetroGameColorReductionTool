@@ -45,6 +45,7 @@ export interface AppState {
   spriteCanvas: HTMLCanvasElement;
   roi: RegionOfInterest | null;
   roiEnabled: boolean;
+  glitchPreviewEnabled: boolean;
   detailWeight: number;
   brightness: number;
   contrast: number;

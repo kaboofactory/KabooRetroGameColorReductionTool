@@ -108,6 +108,25 @@ h2 {
   padding: 10px 14px;
 }
 
+.primary-button {
+  border: 1px solid #cf4f10;
+  background: linear-gradient(180deg, #ff9a3d 0%, #e25a17 100%);
+  color: #fffdf9;
+  border-radius: 999px;
+  padding: 12px 24px;
+  font-weight: 700;
+  min-width: 132px;
+  box-shadow: 0 10px 22px rgba(210, 92, 20, 0.28);
+}
+
+.primary-button:hover {
+  filter: brightness(1.04);
+}
+
+.primary-button:active {
+  transform: translateY(1px);
+}
+
 .tab-button.is-active {
   background: #ff9f43;
   border-color: #ff9f43;
@@ -203,6 +222,7 @@ summary {
   }
 
   .secondary-button,
+  .primary-button,
   .tab-button {
     min-height: 44px;
   }
