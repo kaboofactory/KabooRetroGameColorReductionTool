@@ -691,7 +691,6 @@ function renderBgPaletteInfo(container: HTMLDivElement, analysis: AppState["fami
     <p class="info-line">Spriteユニーク8x8タイル数: ${analysis.uniqueSpriteTileCount} / ${analysis.totalSpriteTileCount}</p>
     <p class="info-line">BG 8x8色数内訳: 1色 ${analysis.bgTileColorStats.oneColorTileCount} / 2色 ${analysis.bgTileColorStats.twoColorTileCount} / 3色 ${analysis.bgTileColorStats.threeColorTileCount} / 4色 ${analysis.bgTileColorStats.fourColorTileCount}</p>
     <p class="info-line">Universal color を使っているBG 8x8タイル数: ${analysis.bgTileColorStats.universalColorUsedTileCount} / ${analysis.totalBgTileCount}</p>
-    <p class="info-line">ファミコンは BG0-BG3 ごとの枚数上限はなく、属性セル割り当てと総タイル数を見ることが重要です。</p>
     ${paletteLines}
     <p class="info-line">BGパレット利用ドット数</p>
     <div class="palette-usage-grid">${bgUsageBlocks}</div>

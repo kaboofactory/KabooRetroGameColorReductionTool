@@ -37,6 +37,7 @@ const TILE_SIZE = 8;
 const BG_SUB_PALETTE_COUNT = 4;
 const SUB_PALETTE_COLOR_COUNT = 3;
 const SCANLINE_SPRITE_LIMIT = 8;
+const TOTAL_SPRITE_LIMIT = 64;
 const BG_PALETTE_REFINEMENT_PASSES = 3;
 const SPRITE_PALETTE_REFINEMENT_PASSES = 2;
 const FAMICOM_PATTERN_TABLE_TILE_LIMIT = 256;
@@ -1704,23 +1705,29 @@ function evaluateHardwareLimits(
 
   findings.push(
     bgTileStats.uniqueTileCount > FAMICOM_PATTERN_TABLE_TILE_LIMIT
-      ? `BGユニーク8x8タイル数が ${bgTileStats.uniqueTileCount} 枚で、256枚想定を超えているにゃ。`
-      : `BGユニーク8x8タイル数は ${bgTileStats.uniqueTileCount} 枚で、256枚想定内にゃ。`
+      ? `BGユニーク8x8タイル数が ${bgTileStats.uniqueTileCount} 枚で、256枚想定オーバー。`
+      : `BGユニーク8x8タイル数は ${bgTileStats.uniqueTileCount} 枚で、256枚想定内。`
   );
   findings.push(
     spriteTileStats.uniqueTileCount > FAMICOM_PATTERN_TABLE_TILE_LIMIT
-      ? `Spriteユニーク8x8タイル数が ${spriteTileStats.uniqueTileCount} 枚で、256枚想定を超えているにゃ。`
-      : `Spriteユニーク8x8タイル数は ${spriteTileStats.uniqueTileCount} 枚で、256枚想定内にゃ。`
+      ? `Spriteユニーク8x8タイル数が ${spriteTileStats.uniqueTileCount} 枚で、256枚想定オーバー。`
+      : `Spriteユニーク8x8タイル数は ${spriteTileStats.uniqueTileCount} 枚で、256枚想定内。`
+  );
+  findings.push(
+    spriteTileStats.totalTileCount > TOTAL_SPRITE_LIMIT
+      ? `採用8x8スプライト総数が ${spriteTileStats.totalTileCount} 枚で、64枚制限オーバー。`
+      : `採用8x8スプライト総数は ${spriteTileStats.totalTileCount} 枚で、64枚制限内。`
   );
   findings.push(
     scanlineOverflowCount > 0
-      ? `走査線8枚制限に ${scanlineOverflowCount} 行で引っかかっているにゃ。`
-      : "走査線8枚制限の概算では超過なしにゃ。"
+      ? `走査線8枚制限に ${scanlineOverflowCount} 行で引っかかっている。`
+      : "走査線8枚制限の概算では超過なし。"
   );
 
   const status =
     bgTileStats.uniqueTileCount > FAMICOM_PATTERN_TABLE_TILE_LIMIT ||
     spriteTileStats.uniqueTileCount > FAMICOM_PATTERN_TABLE_TILE_LIMIT ||
+    spriteTileStats.totalTileCount > TOTAL_SPRITE_LIMIT ||
     scanlineOverflowCount > 0
       ? "warning"
       : "ok";
@@ -2117,6 +2124,11 @@ function selectSpriteTilesIntoBuckets(
   rejectedTiles: Map<string, SpriteTileCandidate>
 ): void {
   for (const [key, tile] of tiles) {
+    if (selectedTiles.size >= TOTAL_SPRITE_LIMIT) {
+      rejectedTiles.set(key, tile);
+      continue;
+    }
+
     const startY = tile.tileY * TILE_SIZE;
     const endY = Math.min(imageHeight, startY + TILE_SIZE);
     let canSelect = true;
