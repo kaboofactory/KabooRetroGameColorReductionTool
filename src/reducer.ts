@@ -797,7 +797,8 @@ function renderFamicomPreview(
       }
 
       writePixel(spriteImage.data, pixelIndex, FAMICOM_PREVIEW_PALETTE[colorIndex], 255);
-      collectSpriteCandidate(spriteCandidates, x, y, attributeCell.overlapsRoi);
+      const pixelInRoi = roi ? isInsideRoi(x, y, roi) : false;
+      collectSpriteCandidate(spriteCandidates, x, y, pixelInRoi);
       const cellKey = makeCellKey(attributeCell.cellX, attributeCell.cellY);
       spritePixelCountByCell.set(cellKey, (spritePixelCountByCell.get(cellKey) ?? 0) + 1);
     }
@@ -824,7 +825,9 @@ function renderFamicomPreview(
     spritePaletteAssignments,
     assignment,
     bgSubPalettes,
-    universalColor
+    universalColor,
+    roi,
+    tuning
   );
   compositeAcceptedSpritesIntoFinal(
     indexedImage,
@@ -836,7 +839,9 @@ function renderFamicomPreview(
     spritePaletteAssignments,
     assignment,
     bgSubPalettes,
-    universalColor
+    universalColor,
+    roi,
+    tuning
   );
   consolidateSpriteTiles(spriteImage, finalImage.data, finalSpriteMask, spriteSelection.selectedTiles, tuning);
   spriteContext.putImageData(spriteImage, 0, 0);
@@ -947,12 +952,12 @@ function shouldForceSpriteInRoi(
   x: number,
   y: number,
   colorIndex: number,
-  attributeCell: FamicomAttributeCell,
+  _attributeCell: FamicomAttributeCell,
   universalColor: number,
   roi: RegionOfInterest | null,
-  tuning: ReductionTuning
+  _tuning: ReductionTuning
 ): boolean {
-  if (!tuning.enableRoiSpriteForce || !roi || !isInsideRoi(x, y, roi)) {
+  if (!roi || !isInsideRoi(x, y, roi)) {
     return false;
   }
 
@@ -960,12 +965,8 @@ function shouldForceSpriteInRoi(
     return false;
   }
 
-  if (attributeCell.topColors.length <= tuning.roiBgColorCapacity) {
-    return false;
-  }
-
-  const primaryBgColors = new Set(attributeCell.topColors.slice(0, tuning.roiBgColorCapacity));
-  return !primaryBgColors.has(colorIndex);
+  // ROI内の文字やグラフィックなどの非背景色ピクセルは、セルの色数や収束パラメータに関わらず100%最優先でスプライト候補にするにゃ
+  return true;
 }
 
 /** BGの類似8x8タイルを代表タイルへ寄せてユニーク数を減らすにゃ。 */
@@ -1990,8 +1991,10 @@ function compositeAcceptedSpritesIntoFinal(
   spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
   spritePaletteAssignments: Map<string, number>,
   assignment: BgAssignmentResult,
-  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
-  universalColor: number
+  _bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  universalColor: number,
+  _roi: RegionOfInterest | null,
+  _tuning: ReductionTuning
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
     const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
@@ -2010,37 +2013,18 @@ function compositeAcceptedSpritesIntoFinal(
           const pixelIndex = y * indexedImage.width + x;
           const colorIndex = indexedImage.pixels[pixelIndex];
 
-          // BGで表現したときの色と誤差
           const attributeCell = assignment.allowedByCell.get(
             makeCellKey(Math.floor(x / ATTRIBUTE_SIZE), Math.floor(y / ATTRIBUTE_SIZE))
           );
-          let bgError = Number.MAX_VALUE;
-          let reducedBgColor = universalColor;
-          if (attributeCell) {
-            const bgPalette = bgSubPalettes[attributeCell.paletteIndex];
-            reducedBgColor = chooseNearestAllowedColor(colorIndex, universalColor, bgPalette);
-            const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
-            const bgRgb = FAMICOM_PREVIEW_PALETTE[reducedBgColor];
-            bgError =
-              (sourceColor[0] - bgRgb[0]) ** 2 +
-              (sourceColor[1] - bgRgb[1]) ** 2 +
-              (sourceColor[2] - bgRgb[2]) ** 2;
-          }
 
-          // スプライトで表現したときの色と誤差
-          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
-          const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
-          const spriteRgb = FAMICOM_PREVIEW_PALETTE[reducedSpriteColor];
-          const spriteError =
-            (sourceColor[0] - spriteRgb[0]) ** 2 +
-            (sourceColor[1] - spriteRgb[1]) ** 2 +
-            (sourceColor[2] - spriteRgb[2]) ** 2;
-
-          // BGで表現したほうが誤差が同等以下なら、スプライト側は透明（上書きしない）にするにゃ
-          if (bgError <= spriteError) {
+          // セル内の最頻出背景色、または全体共通背景色と一致するピクセル（背景色）はスプライト側では透明にするにゃ
+          const cellBgColor = attributeCell?.topColors[0] ?? universalColor;
+          if (colorIndex === cellBgColor || colorIndex === universalColor) {
             continue;
           }
 
+          // 文字やカーソル等の非背景色ピクセルだけをピンポイントでスプライト合成するにゃ
+          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
           writePixel(finalPixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedSpriteColor], 255);
           finalSpriteMask[pixelIndex] = 1;
         }
@@ -2270,7 +2254,13 @@ function selectSpriteTiles(
   imageHeight: number,
   spriteCandidates: Map<string, SpriteTileCandidate>
 ): SpriteSelectionResult {
-  const sortedTiles = [...spriteCandidates.entries()].sort((left, right) => right[1].pixelCount - left[1].pixelCount);
+  const sortedTiles = [...spriteCandidates.entries()].sort((left, right) => {
+    if (left[1].overlapsRoi !== right[1].overlapsRoi) {
+      return left[1].overlapsRoi ? -1 : 1;
+    }
+    return right[1].pixelCount - left[1].pixelCount;
+  });
+
   const roiTiles = sortedTiles.filter((entry) => entry[1].overlapsRoi);
   const nonRoiTiles = sortedTiles.filter((entry) => !entry[1].overlapsRoi);
   const scanlineCounts = new Uint16Array(imageHeight);
@@ -2278,16 +2268,11 @@ function selectSpriteTiles(
   const rejectedTiles = new Map<string, SpriteTileCandidate>();
   let scanlineOverflowCount = 0;
 
-  selectSpriteTilesIntoBuckets(roiTiles, imageHeight, scanlineCounts, selectedTiles, rejectedTiles);
-  selectSpriteTilesIntoBuckets(nonRoiTiles, imageHeight, scanlineCounts, selectedTiles, rejectedTiles);
+  // タイル行ごとにラウンドロビン形式で分散採用するにゃ
+  selectSpriteTilesRoundRobin(roiTiles, imageHeight, scanlineCounts, selectedTiles, rejectedTiles);
+  selectSpriteTilesRoundRobin(nonRoiTiles, imageHeight, scanlineCounts, selectedTiles, rejectedTiles);
 
-  for (const [key, tile] of roiTiles) {
-    if (!selectedTiles.has(key) && !rejectedTiles.has(key)) {
-      rejectedTiles.set(key, tile);
-    }
-  }
-
-  for (const [key, tile] of nonRoiTiles) {
+  for (const [key, tile] of sortedTiles) {
     if (!selectedTiles.has(key) && !rejectedTiles.has(key)) {
       rejectedTiles.set(key, tile);
     }
@@ -2306,40 +2291,65 @@ function selectSpriteTiles(
   };
 }
 
-/** 指定候補群を現在の走査線空き状況に従って採用するにゃ。 */
-function selectSpriteTilesIntoBuckets(
+/** タイル行ごとにラウンドロビン形式でスプライトタイルを選択するにゃ。 */
+function selectSpriteTilesRoundRobin(
   tiles: Array<[string, SpriteTileCandidate]>,
   imageHeight: number,
   scanlineCounts: Uint16Array,
   selectedTiles: Map<string, SpriteTileCandidate>,
   rejectedTiles: Map<string, SpriteTileCandidate>
 ): void {
-  for (const [key, tile] of tiles) {
-    if (selectedTiles.size >= TOTAL_SPRITE_LIMIT) {
-      rejectedTiles.set(key, tile);
-      continue;
+  const tilesY = Math.ceil(imageHeight / TILE_SIZE);
+  const groups: Array<Array<[string, SpriteTileCandidate]>> = Array.from({ length: tilesY }, () => []);
+
+  for (const entry of tiles) {
+    const tile = entry[1];
+    if (tile.tileY >= 0 && tile.tileY < tilesY) {
+      groups[tile.tileY].push(entry);
     }
+  }
 
-    const startY = tile.tileY * TILE_SIZE;
-    const endY = Math.min(imageHeight, startY + TILE_SIZE);
-    let canSelect = true;
+  let hasMore = true;
+  let round = 0;
 
-    for (let y = startY; y < endY; y += 1) {
-      if (scanlineCounts[y] >= SCANLINE_SPRITE_LIMIT) {
-        canSelect = false;
-        break;
+  while (hasMore) {
+    hasMore = false;
+
+    for (let tileY = 0; tileY < tilesY; tileY += 1) {
+      const group = groups[tileY];
+      if (round < group.length) {
+        hasMore = true;
+        const [key, tile] = group[round];
+
+        if (selectedTiles.size >= TOTAL_SPRITE_LIMIT) {
+          rejectedTiles.set(key, tile);
+          continue;
+        }
+
+        const startY = tile.tileY * TILE_SIZE;
+        const endY = Math.min(imageHeight, startY + TILE_SIZE);
+        let canSelect = true;
+
+        for (let y = startY; y < endY; y += 1) {
+          if (scanlineCounts[y] >= SCANLINE_SPRITE_LIMIT) {
+            canSelect = false;
+            break;
+          }
+        }
+
+        if (!canSelect) {
+          rejectedTiles.set(key, tile);
+          continue;
+        }
+
+        selectedTiles.set(key, tile);
+        for (let y = startY; y < endY; y += 1) {
+          scanlineCounts[y] += 1;
+        }
       }
     }
 
-    if (!canSelect) {
-      rejectedTiles.set(key, tile);
-      continue;
-    }
-
-    selectedTiles.set(key, tile);
-    for (let y = startY; y < endY; y += 1) {
-        scanlineCounts[y] += 1;
-    }
+    round += 1;
   }
 }
 
@@ -2352,8 +2362,10 @@ function recolorAcceptedSpritePixels(
   spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
   spritePaletteAssignments: Map<string, number>,
   assignment: BgAssignmentResult,
-  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
-  universalColor: number
+  _bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  universalColor: number,
+  _roi: RegionOfInterest | null,
+  _tuning: ReductionTuning
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
     const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
@@ -2372,38 +2384,19 @@ function recolorAcceptedSpritePixels(
           const pixelIndex = y * indexedImage.width + x;
           const colorIndex = indexedImage.pixels[pixelIndex];
 
-          // BGで表現したときの色と誤差
           const attributeCell = assignment.allowedByCell.get(
             makeCellKey(Math.floor(x / ATTRIBUTE_SIZE), Math.floor(y / ATTRIBUTE_SIZE))
           );
-          let bgError = Number.MAX_VALUE;
-          let reducedBgColor = universalColor;
-          if (attributeCell) {
-            const bgPalette = bgSubPalettes[attributeCell.paletteIndex];
-            reducedBgColor = chooseNearestAllowedColor(colorIndex, universalColor, bgPalette);
-            const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
-            const bgRgb = FAMICOM_PREVIEW_PALETTE[reducedBgColor];
-            bgError =
-              (sourceColor[0] - bgRgb[0]) ** 2 +
-              (sourceColor[1] - bgRgb[1]) ** 2 +
-              (sourceColor[2] - bgRgb[2]) ** 2;
-          }
 
-          // スプライトで表現したときの色と誤差
-          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
-          const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
-          const spriteRgb = FAMICOM_PREVIEW_PALETTE[reducedSpriteColor];
-          const spriteError =
-            (sourceColor[0] - spriteRgb[0]) ** 2 +
-            (sourceColor[1] - spriteRgb[1]) ** 2 +
-            (sourceColor[2] - spriteRgb[2]) ** 2;
-
-          // BGで表現したほうが誤差が同等以下なら、スプライト側は透明（描画しない）にするにゃ
-          if (bgError <= spriteError) {
+          // セル内の最頻出背景色、または全体共通背景色と一致するピクセル（背景色）はスプライト側では透明（描画しない）にするにゃ
+          const cellBgColor = attributeCell?.topColors[0] ?? universalColor;
+          if (colorIndex === cellBgColor || colorIndex === universalColor) {
             writePixel(spritePixelData, pixelIndex, UNUSED_PREVIEW_PIXEL, 255);
             continue;
           }
 
+          // 文字やカーソル等の非背景色ピクセルだけをピンポイントでスプライト描画するにゃ
+          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
           writePixel(spritePixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedSpriteColor], 255);
         }
       }
