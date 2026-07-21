@@ -989,8 +989,142 @@ function consolidateBgTiles(
     return;
   }
 
-  const representatives: Array<{ pixels: number[]; usageCount: number; paletteIndex: number }> = [];
+  // パレットごとの出現数を集計して動的に代表タイル枠の上限を割り振るにゃ
+  const usageCounts = new Uint32Array(BG_SUB_PALETTE_COUNT);
+  for (const tile of tileEntries) {
+    if (tile.paletteIndex >= 0 && tile.paletteIndex < BG_SUB_PALETTE_COUNT) {
+      usageCounts[tile.paletteIndex] += 1;
+    }
+  }
 
+  const limits = new Uint32Array(BG_SUB_PALETTE_COUNT);
+  const minLimit = 16; // 最低保証数
+  let remainingQuota = FAMICOM_PATTERN_TABLE_TILE_LIMIT;
+
+  // 使用されているアクティブパレット数
+  let activePaletteCount = 0;
+  for (let i = 0; i < BG_SUB_PALETTE_COUNT; i += 1) {
+    if (usageCounts[i] > 0) {
+      activePaletteCount += 1;
+    }
+  }
+
+  // まず使用パレットに最低保証数を配分するにゃ
+  for (let i = 0; i < BG_SUB_PALETTE_COUNT; i += 1) {
+    if (usageCounts[i] > 0) {
+      limits[i] = Math.min(usageCounts[i], minLimit);
+      remainingQuota -= limits[i];
+    }
+  }
+
+  // 残りの枠を使用比率で比例配分するにゃ
+  const activeTotal = [...usageCounts].reduce((sum, count) => sum + count, 0);
+  if (activeTotal > 0 && remainingQuota > 0) {
+    for (let i = 0; i < BG_SUB_PALETTE_COUNT; i += 1) {
+      if (usageCounts[i] > 0) {
+        const extra = Math.round((usageCounts[i] / activeTotal) * remainingQuota);
+        limits[i] += extra;
+      }
+    }
+  }
+
+  // 端数により256を超えないように微調整するにゃ
+  let sumLimits = [...limits].reduce((sum, val) => sum + val, 0);
+  while (sumLimits > FAMICOM_PATTERN_TABLE_TILE_LIMIT) {
+    let maxIdx = 0;
+    for (let i = 1; i < BG_SUB_PALETTE_COUNT; i += 1) {
+      if (limits[i] > limits[maxIdx]) {
+        maxIdx = i;
+      }
+    }
+    limits[maxIdx] -= 1;
+    sumLimits -= 1;
+  }
+
+  // 各パレットごとに、ユニークなタイルの出現数を集計するにゃ
+  const uniqueTilesByPalette = Array.from(
+    { length: BG_SUB_PALETTE_COUNT },
+    () => new Map<string, { pixels: number[]; count: number }>()
+  );
+
+  for (const tile of tileEntries) {
+    if (tile.paletteIndex < 0 || tile.paletteIndex >= BG_SUB_PALETTE_COUNT) {
+      continue;
+    }
+    const hash = tile.pixels.join(",");
+    const bucket = uniqueTilesByPalette[tile.paletteIndex];
+    const existing = bucket.get(hash);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      bucket.set(hash, { pixels: tile.pixels, count: 1 });
+    }
+  }
+
+  const representatives: Array<{ pixels: number[]; usageCount: number; paletteIndex: number; hash: string }> = [];
+
+  for (let paletteIndex = 0; paletteIndex < BG_SUB_PALETTE_COUNT; paletteIndex += 1) {
+    const limitForPalette = limits[paletteIndex];
+    if (limitForPalette === 0) {
+      continue;
+    }
+
+    // 出現頻度（使用面積）の高い順にソートするにゃ
+    const sortedUniques = [...uniqueTilesByPalette[paletteIndex].values()]
+      .sort((left, right) => right.count - left.count);
+
+    const repsForThisPalette: typeof representatives = [];
+
+    for (const unique of sortedUniques) {
+      if (repsForThisPalette.length >= limitForPalette) {
+        break;
+      }
+
+      // すでに登録された同一パレットの代表タイルとの最小距離を測定するにゃ
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const rep of repsForThisPalette) {
+        const distance = measureTileDistance(unique.pixels, rep.pixels);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+        }
+      }
+
+      // 代表タイル同士が近すぎる場合はスキップして、重複を避けるにゃ
+      const tooClose = repsForThisPalette.length > 0 && bestDistance <= BG_TILE_MERGE_THRESHOLD_STEPS[tuning.bgMergeStepIndex];
+      if (tooClose) {
+        continue;
+      }
+
+      repsForThisPalette.push({
+        pixels: unique.pixels,
+        usageCount: 0,
+        paletteIndex,
+        hash: unique.pixels.join(",")
+      });
+    }
+
+    // 閾値制限のせいで登録数が上限に満たなかった場合、制限を無視して頻度順に詰め込むにゃ
+    if (repsForThisPalette.length < limitForPalette) {
+      for (const unique of sortedUniques) {
+        if (repsForThisPalette.length >= limitForPalette) {
+          break;
+        }
+        const hash = unique.pixels.join(",");
+        if (!repsForThisPalette.some(r => r.hash === hash)) {
+          repsForThisPalette.push({
+            pixels: unique.pixels,
+            usageCount: 0,
+            paletteIndex,
+            hash
+          });
+        }
+      }
+    }
+
+    representatives.push(...repsForThisPalette);
+  }
+
+  // すべてのタイルを、決定された代表タイル群にマッピング（統合）するにゃ
   for (const tile of tileEntries) {
     let bestRepresentativeIndex = -1;
     let bestDistance = Number.POSITIVE_INFINITY;
@@ -1000,19 +1134,36 @@ function consolidateBgTiles(
         continue;
       }
       const distance = measureTileDistance(tile.pixels, representatives[index].pixels);
+
       if (distance < bestDistance) {
         bestDistance = distance;
         bestRepresentativeIndex = index;
       }
     }
 
-    const canCreateNewRepresentative =
-      representatives.length < FAMICOM_PATTERN_TABLE_TILE_LIMIT &&
-      (bestRepresentativeIndex === -1 || bestDistance > BG_TILE_MERGE_THRESHOLD_STEPS[tuning.bgMergeStepIndex]);
+    // 同一パレットの代表タイルが見つからなかった場合のフォールバック先を選ぶにゃ
+    if (bestRepresentativeIndex === -1) {
+      let minDistance = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < representatives.length; index += 1) {
+        if (representatives[index].paletteIndex === tile.paletteIndex) {
+          const distance = measureTileDistance(tile.pixels, representatives[index].pixels);
+          if (distance < minDistance) {
+            minDistance = distance;
+            bestRepresentativeIndex = index;
+          }
+        }
+      }
 
-    if (canCreateNewRepresentative) {
-      representatives.push({ pixels: tile.pixels, usageCount: 1, paletteIndex: tile.paletteIndex });
-      continue;
+      if (bestRepresentativeIndex === -1) {
+        let minGlobalDistance = Number.POSITIVE_INFINITY;
+        for (let index = 0; index < representatives.length; index += 1) {
+          const distance = measureTileDistance(tile.pixels, representatives[index].pixels);
+          if (distance < minGlobalDistance) {
+            minGlobalDistance = distance;
+            bestRepresentativeIndex = index;
+          }
+        }
+      }
     }
 
     const representative = representatives[Math.max(0, bestRepresentativeIndex)];
