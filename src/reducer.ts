@@ -821,7 +821,10 @@ function renderFamicomPreview(
     spriteSelection.selectedTiles,
     spriteClusterAnalyses,
     spriteSubPalettes,
-    spritePaletteAssignments
+    spritePaletteAssignments,
+    assignment,
+    bgSubPalettes,
+    universalColor
   );
   compositeAcceptedSpritesIntoFinal(
     indexedImage,
@@ -830,7 +833,10 @@ function renderFamicomPreview(
     spriteSelection.selectedTiles,
     spriteClusterAnalyses,
     spriteSubPalettes,
-    spritePaletteAssignments
+    spritePaletteAssignments,
+    assignment,
+    bgSubPalettes,
+    universalColor
   );
   consolidateSpriteTiles(spriteImage, finalImage.data, finalSpriteMask, spriteSelection.selectedTiles, tuning);
   spriteContext.putImageData(spriteImage, 0, 0);
@@ -1982,7 +1988,10 @@ function compositeAcceptedSpritesIntoFinal(
   selectedTiles: Map<string, SpriteTileCandidate>,
   spriteClusterAnalyses: Map<string, SpriteClusterAnalysis>,
   spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
-  spritePaletteAssignments: Map<string, number>
+  spritePaletteAssignments: Map<string, number>,
+  assignment: BgAssignmentResult,
+  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  universalColor: number
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
     const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
@@ -2000,8 +2009,39 @@ function compositeAcceptedSpritesIntoFinal(
         for (let x = startX; x < Math.min(indexedImage.width, startX + TILE_SIZE); x += 1) {
           const pixelIndex = y * indexedImage.width + x;
           const colorIndex = indexedImage.pixels[pixelIndex];
-          const reducedColor = chooseNearestSpritePaletteColor(colorIndex, palette);
-          writePixel(finalPixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedColor], 255);
+
+          // BGで表現したときの色と誤差
+          const attributeCell = assignment.allowedByCell.get(
+            makeCellKey(Math.floor(x / ATTRIBUTE_SIZE), Math.floor(y / ATTRIBUTE_SIZE))
+          );
+          let bgError = Number.MAX_VALUE;
+          let reducedBgColor = universalColor;
+          if (attributeCell) {
+            const bgPalette = bgSubPalettes[attributeCell.paletteIndex];
+            reducedBgColor = chooseNearestAllowedColor(colorIndex, universalColor, bgPalette);
+            const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
+            const bgRgb = FAMICOM_PREVIEW_PALETTE[reducedBgColor];
+            bgError =
+              (sourceColor[0] - bgRgb[0]) ** 2 +
+              (sourceColor[1] - bgRgb[1]) ** 2 +
+              (sourceColor[2] - bgRgb[2]) ** 2;
+          }
+
+          // スプライトで表現したときの色と誤差
+          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
+          const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
+          const spriteRgb = FAMICOM_PREVIEW_PALETTE[reducedSpriteColor];
+          const spriteError =
+            (sourceColor[0] - spriteRgb[0]) ** 2 +
+            (sourceColor[1] - spriteRgb[1]) ** 2 +
+            (sourceColor[2] - spriteRgb[2]) ** 2;
+
+          // BGで表現したほうが誤差が同等以下なら、スプライト側は透明（上書きしない）にするにゃ
+          if (bgError <= spriteError) {
+            continue;
+          }
+
+          writePixel(finalPixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedSpriteColor], 255);
           finalSpriteMask[pixelIndex] = 1;
         }
       }
@@ -2310,7 +2350,10 @@ function recolorAcceptedSpritePixels(
   selectedTiles: Map<string, SpriteTileCandidate>,
   spriteClusterAnalyses: Map<string, SpriteClusterAnalysis>,
   spriteSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
-  spritePaletteAssignments: Map<string, number>
+  spritePaletteAssignments: Map<string, number>,
+  assignment: BgAssignmentResult,
+  bgSubPalettes: [FamicomSubPalette, FamicomSubPalette, FamicomSubPalette, FamicomSubPalette],
+  universalColor: number
 ): void {
   for (const clusterAnalysis of spriteClusterAnalyses.values()) {
     const paletteIndex = spritePaletteAssignments.get(clusterAnalysis.key) ?? chooseBestSpritePalette(clusterAnalysis.colors, spriteSubPalettes);
@@ -2328,8 +2371,40 @@ function recolorAcceptedSpritePixels(
         for (let x = startX; x < Math.min(indexedImage.width, startX + TILE_SIZE); x += 1) {
           const pixelIndex = y * indexedImage.width + x;
           const colorIndex = indexedImage.pixels[pixelIndex];
-          const reducedColor = chooseNearestSpritePaletteColor(colorIndex, palette);
-          writePixel(spritePixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedColor], 255);
+
+          // BGで表現したときの色と誤差
+          const attributeCell = assignment.allowedByCell.get(
+            makeCellKey(Math.floor(x / ATTRIBUTE_SIZE), Math.floor(y / ATTRIBUTE_SIZE))
+          );
+          let bgError = Number.MAX_VALUE;
+          let reducedBgColor = universalColor;
+          if (attributeCell) {
+            const bgPalette = bgSubPalettes[attributeCell.paletteIndex];
+            reducedBgColor = chooseNearestAllowedColor(colorIndex, universalColor, bgPalette);
+            const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
+            const bgRgb = FAMICOM_PREVIEW_PALETTE[reducedBgColor];
+            bgError =
+              (sourceColor[0] - bgRgb[0]) ** 2 +
+              (sourceColor[1] - bgRgb[1]) ** 2 +
+              (sourceColor[2] - bgRgb[2]) ** 2;
+          }
+
+          // スプライトで表現したときの色と誤差
+          const reducedSpriteColor = chooseNearestSpritePaletteColor(colorIndex, palette);
+          const sourceColor = FAMICOM_PREVIEW_PALETTE[colorIndex];
+          const spriteRgb = FAMICOM_PREVIEW_PALETTE[reducedSpriteColor];
+          const spriteError =
+            (sourceColor[0] - spriteRgb[0]) ** 2 +
+            (sourceColor[1] - spriteRgb[1]) ** 2 +
+            (sourceColor[2] - spriteRgb[2]) ** 2;
+
+          // BGで表現したほうが誤差が同等以下なら、スプライト側は透明（描画しない）にするにゃ
+          if (bgError <= spriteError) {
+            writePixel(spritePixelData, pixelIndex, UNUSED_PREVIEW_PIXEL, 255);
+            continue;
+          }
+
+          writePixel(spritePixelData, pixelIndex, FAMICOM_PREVIEW_PALETTE[reducedSpriteColor], 255);
         }
       }
     }
